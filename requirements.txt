@@ -1,0 +1,7 @@
+streamlit
+python-dotenv
+openai
+httpx
+dateparser
+reportlab
+numpy

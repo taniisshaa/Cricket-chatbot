@@ -1,0 +1,171 @@
+import asyncio
+from datetime import datetime, date
+from app.utils_core import get_logger
+from app.backend_core import getSeriesInfo, getMatchScorecard, get_series_matches_by_id, getSeries, _normalize_sportmonks_to_app_format
+
+from app.backend_core import getSeriesInfo, getMatchScorecard, get_series_matches_by_id, getSeries
+from app.search_service import find_series_smart
+
+logger = get_logger("analytics_svc")
+
+async def get_series_final_info(series_id):
+    res = await get_series_matches_by_id(series_id)
+    matches = res.get("data", [])
+    if not matches: return None
+    completed = [m for m in matches if m.get("matchEnded")]
+    if completed: return {"data": completed[-1]}
+    return None
+
+async def get_player_recent_performance(player_name, series_id=None):
+    # Simplified version
+    return None # Placeholder
+
+async def handle_tournament_specialist_logic(analysis, user_query, series_name=None, year=None):
+    if not series_name: return None
+    sid = await find_series_smart(series_name, year)
+    if not sid: return None
+    
+    intent = analysis.get("intent", "").lower()
+    
+    if "winner" in intent or "standings" in intent:
+        s = await get_series_analytics(sid)
+        return {"winner_info": s.get("winner_info"), "leaders": s.get("batting_leaders")}
+        
+    return None
+
+
+async def extract_series_winner(series_id, matches=None):
+    if not matches:
+        data = await get_series_matches_by_id(series_id)
+        matches = data.get("data", [])
+    if not matches: return None
+    
+    completed_matches = [m for m in matches if m.get("matchEnded")]
+    if not completed_matches: return None
+    
+    final_match = completed_matches[-1]
+    winner = final_match.get("winner") or final_match.get("matchWinner")
+    
+    # Calculate points table
+    points_table = {}
+    for m in matches:
+        t1, t2 = m.get("t1"), m.get("t2")
+        w = m.get("winner")
+        status = m.get("status", "").lower()
+        if "abandoned" in status or "no result" in status:
+            if t1: points_table[t1] = points_table.get(t1, 0) + 1
+            if t2: points_table[t2] = points_table.get(t2, 0) + 1
+        elif w:
+            points_table[w] = points_table.get(w, 0) + 2
+            
+    sorted_pts = sorted(points_table.items(), key=lambda x: x[1], reverse=True)
+    
+    return {
+        "winner": winner or "Unknown",
+        "final_match": final_match.get("name"),
+        "total_matches": len(matches),
+        "points_leaders": sorted_pts[:4]
+    }
+
+async def get_series_analytics(series_id, deep_scan=True, segment=None, limit=None):
+    """
+    Detailed Series Analytics.
+    """
+    res = await get_series_matches_by_id(series_id)
+    matches = res.get("data", [])
+    if not matches: return None
+    
+    analytics = {
+        "series_info": res.get("info", {}),
+        "total_matches": len(matches),
+        "matches_analyzed": 0,
+        "highest_score": {"runs": 0, "team": "", "match": ""},
+        "most_runs": {},
+        "most_wickets": {}
+    }
+    
+    completed = [m for m in matches if m.get("matchEnded")]
+    if limit: completed = completed[:limit]
+    
+    analytics["matches_analyzed"] = len(completed)
+    
+    # Chunked fetching for deep scan
+    tasks = []
+    chunk_size = 10
+    
+    scorecards = []
+    for i in range(0, len(completed), chunk_size):
+        chunk = completed[i:i+chunk_size]
+        t = [getMatchScorecard(m["id"]) for m in chunk]
+        r = await asyncio.gather(*t, return_exceptions=True)
+        scorecards.extend(r)
+        
+    for sc in scorecards:
+        if isinstance(sc, Exception) or not sc.get("data"): continue
+        data = sc["data"]
+        
+        # Team Scores
+        for inn in data.get("scorecard", []):
+            try:
+                r = int(inn.get("totals", {}).get("R") or 0)
+                team = inn.get("inning", "").split(" Inning")[0]
+                if r > analytics["highest_score"]["runs"]:
+                    analytics["highest_score"] = {"runs": r, "team": team, "match": data.get("name")}
+                    
+                # Player Stats
+                for b in inn.get("batting", []):
+                    p_name = b.get("batsman", {}).get("name")
+                    runs = int(b.get("r") or 0)
+                    if p_name:
+                        analytics["most_runs"][p_name] = analytics["most_runs"].get(p_name, 0) + runs
+                        
+                for b in inn.get("bowling", []):
+                    p_name = b.get("bowler", {}).get("name")
+                    w = int(b.get("w") or 0)
+                    if p_name:
+                        analytics["most_wickets"][p_name] = analytics["most_wickets"].get(p_name, 0) + w
+            except: pass
+
+    # Sort leaders
+    analytics["batting_leaders"] = sorted(analytics["most_runs"].items(), key=lambda x: x[1], reverse=True)[:5]
+    analytics["bowling_leaders"] = sorted(analytics["most_wickets"].items(), key=lambda x: x[1], reverse=True)[:5]
+    
+    del analytics["most_runs"]
+    del analytics["most_wickets"]
+    
+    analytics["winner_info"] = await extract_series_winner(series_id, matches)
+    
+    return analytics
+
+async def get_series_top_performers(series_id):
+    """Wrapper using get_series_analytics."""
+    return await get_series_analytics(series_id)
+
+async def get_head_to_head_statistics(team_a, team_b, limit=10):
+    logger.info(f"H2H: {team_a} vs {team_b}")
+    queries = [f"{team_a} vs {team_b}", f"{team_b} vs {team_a}"]
+    tasks = [getSeries(q, rows=10) for q in queries]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    matches_found = []
+    
+    for r in results:
+        if isinstance(r, dict) and r.get("data"):
+            for s in r["data"]:
+                s_info = await getSeriesInfo(s["id"])
+                if s_info.get("data"):
+                     m_list = s_info["data"].get("matchList", [])
+                     for m in m_list:
+                         if (team_a.lower() in m.get("name", "").lower() and team_b.lower() in m.get("name", "").lower()) and m.get("matchEnded"):
+                             matches_found.append(m)
+                             
+    # Dedup
+    unique = {m["id"]: m for m in matches_found}.values()
+    final = sorted(unique, key=lambda x: x.get("date", ""), reverse=True)[:limit]
+    
+    return {
+        "team_a": team_a,
+        "team_b": team_b,
+        "matches": final,
+        "count": len(final)
+    }
