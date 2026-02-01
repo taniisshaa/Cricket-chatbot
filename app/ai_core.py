@@ -253,6 +253,14 @@ Your goal is to classify intent dynamically based on **Linguistic Tense** and **
    - Examples: "Fastest 50 in 2024", "Highest team score", "Most sixes by a player".
    - Note: This is distinct from general stats; it asks for a specific historical feat.
 
+8. **DEEP_REASONING (Complex/Multi-step)**:
+   - **Signal**: Questions requiring multiple steps or logical deduction.
+   - Examples: 
+     - "Who was the Man of the Match in the last game India played against Australia?" (Find Match -> Get MOM).
+     - "Compare the strike rate of Kohli and Rohit in the last 5 matches." (Find Matches -> Get Stats -> Compare).
+     - "Did Mumbai win the match where Pollard scored 60?" (Find Match by Player Score -> Check Result).
+   - **Logic**: If the answer isn't a direct lookup but a *process*, use this.
+
 [CONTEXTUAL RESOLUTION - "MEMORY MODE"]
 
 Your most important task is handling **follow-up questions** (Contextual Inference).
@@ -730,3 +738,180 @@ async def generate_human_response(api_results, user_query, analysis, conversatio
 
 async def search_web(query):
     return "Web search restricted."
+
+# ==============================================================================
+# 🧠 NEW GENERATION: ReAct Agent (Inspired by Dify.AI)
+# ==============================================================================
+
+REACT_SYSTEM_PROMPT = """
+You are the **Antigravity Cricket Super-Agent**. 🏏
+
+Your goal is to answer complex cricket queries by **Reasoning** and **Acting**.
+You have access to a set of specific tools.
+
+[TOOLS AVAILABLE]
+- **get_live_matches(team_name=None)**: Get live scores and commentary. Use this for "current status", "who is winning".
+- **get_match_history(team_name, year, opponent=None)**: Search for PAST matches. Returns list of matches with IDs.
+- **get_match_scorecard(match_id)**: Get DETAILED scorecard (players, runs, wickets) for a specific match ID.
+- **get_series_stats(series_id)**: Get top run scorers/wicket takers for a tournament.
+- **get_player_stats(player_name)**: Get profile and career stats.
+
+[PROTOCOL - "ReAct"]
+You must generate a sequence of valid JSON steps. 
+For each step, output a single JSON object describing your THOUGHT and ACTION.
+After you output the JSON, the system will execute the tool and provide the "[OBSERVATION]".
+
+Your Output Format (Strict JSON):
+```json
+{
+  "thought": "I need to find the match ID for India vs Pak last year to check the scorecard.",
+  "action": "get_match_history",
+  "action_input": {"team_name": "India", "opponent": "Pakistan", "year": 2024}
+}
+```
+
+Then I (the System) will give you:
+[OBSERVATION]: [{"id": 12345, "name": "India vs Pakistan", ...}]
+
+Then you output the next step:
+```json
+{
+  "thought": "I found the match ID 12345. Now I need the scorecard to see who scored most runs.",
+  "action": "get_match_scorecard",
+  "action_input": {"match_id": 12345}
+}
+```
+
+... Repeat until you have the answer.
+
+[FINAL ANSWER]
+When you have the answer, output:
+```json
+{
+  "thought": "I have all the info.",
+  "final_answer": "India won by 5 wickets. Virat Kohli scored 82 runs."
+}
+```
+
+[RULES]
+1. **Always** check `get_live_matches` first if the user asks about "score" without a date.
+2. If tool returns multiple matches, pick the most relevant one (usually the latest one).
+3. If tool returns explicit details (like "India won"), you don't need to call more tools unless the user asked for specific player stats.
+4. **Current Date**: {TODAY}. Current Year: {CURRENT_YEAR}.
+"""
+
+class ReActAgent:
+    def __init__(self, user_query, history=None):
+        self.client = get_ai_client()
+        self.query = user_query
+        self.history = history or []
+        self.max_steps = 5
+        self.current_step = 0
+        self.log = []
+
+    async def run(self):
+        # 1. Initialize
+        messages = [{"role": "system", "content": REACT_SYSTEM_PROMPT.format(TODAY=TODAY, CURRENT_YEAR=CURRENT_YEAR)}]
+        
+        # Add conversation history
+        if self.history:
+            messages.extend(self.history[-4:]) # Keep it short context
+            
+        messages.append({"role": "user", "content": f"QUERY: {self.query}"})
+        
+        final_answer = None
+
+        while self.current_step < self.max_steps:
+            self.current_step += 1
+            print(f"--- Step {self.current_step} ---")
+
+            # 2. Call LLM
+            try:
+                response = await self.client.chat.completions.create(
+                    model=get_model_name(),
+                    messages=messages,
+                    temperature=0.1, # Low temp for precise tool calling
+                    response_format={"type": "json_object"}
+                )
+                content = response.choices[0].message.content
+                messages.append({"role": "assistant", "content": content})
+                
+                # 3. Parse JSON
+                try:
+                    step_data = json.loads(content)
+                except json.JSONDecodeError:
+                    # Fallback if LLM messes up JSON
+                    if "final_answer" in content:
+                        final_answer = content
+                        break
+                    else:
+                        messages.append({"role": "user", "content": "Error: Invalid JSON format. Please output strictly JSON."})
+                        continue
+
+                thought = step_data.get("thought", "")
+                action = step_data.get("action")
+                action_input = step_data.get("action_input", {})
+                fin_ans = step_data.get("final_answer")
+
+                logger.info(f"ReAct Step {self.current_step} | Think: {thought} | Act: {action}")
+
+                if fin_ans:
+                    final_answer = fin_ans
+                    break
+
+                # 4. Execute Tool
+                observation = await self._execute_tool(action, action_input)
+                
+                # 5. Append Observation
+                obs_str = f"[OBSERVATION]: {json.dumps(observation, default=str)}"
+                messages.append({"role": "user", "content": obs_str})
+                
+            except Exception as e:
+                logger.error(f"ReAct Loop Error: {e}")
+                messages.append({"role": "user", "content": f"System Error: {str(e)}"})
+
+        return final_answer or "I could not retrieve the complete information in time."
+
+    async def _execute_tool(self, tool_name, args):
+        """Map tool names to actual functions in backend_core or history_service"""
+        try:
+            from app.backend_core import get_live_matches, get_match_scorecard, getMatchInfo, getPlayers
+            from app.history_service import search_historical_matches, get_series_history_summary
+            
+            if tool_name == "get_live_matches":
+                return await get_live_matches(**args)
+            
+            elif tool_name == "get_match_history":
+                # Wrapper for history search
+                return await search_historical_matches(
+                    query=args.get("query"),
+                    team=args.get("team_name"),
+                    year=args.get("year"),
+                    limit=3
+                )
+            
+            elif tool_name == "get_match_scorecard":
+                mid = args.get("match_id")
+                return await get_match_scorecard(mid)
+            
+            elif tool_name == "get_series_stats":
+                sid = args.get("series_id")
+                return await get_series_history_summary("series", year=None, series_id=sid)
+            
+            elif tool_name == "get_player_stats":
+                name = args.get("player_name")
+                # Basic player search for now
+                res = await getPlayers(search=name)
+                return res
+                
+            else:
+                return {"error": f"Unknown tool '{tool_name}'"}
+                
+        except Exception as e:
+            return {"error": f"Tool Execution Failed: {str(e)}"}
+
+async def run_reasoning_agent(user_query, history=None):
+    """Entry point for the ReAct Agent"""
+    agent = ReActAgent(user_query, history)
+    result = await agent.run()
+    return result

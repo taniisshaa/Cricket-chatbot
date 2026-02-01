@@ -45,7 +45,7 @@ async def get_matches_by_date(target_date, team_name=None, use_cache=True):
     """
     logger.info(f"Fetching Matches for Date: {target_date} (Team: {team_name})")
 
-    includes = "localteam,visitorteam,runs,venue"
+    includes = "localteam,visitorteam,runs,venue,manofmatch,batting.batsman,bowling.bowler"
     
     # Try exact date first
     res = await sportmonks_cric("/fixtures", {

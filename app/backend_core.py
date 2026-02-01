@@ -111,10 +111,10 @@ async def getSeriesInfo(series_id, includes=None, **kwargs):
     }
 
 async def getMatchScorecard(match_id, **kwargs):
-    return await sportmonks_cric(f"/fixtures/{match_id}", {"include": "localteam,visitorteam,runs,batting.batsman,bowling.bowler,venue,balls,scoreboards"}, **kwargs)
+    return await sportmonks_cric(f"/fixtures/{match_id}", {"include": "localteam,visitorteam,runs,batting.batsman,bowling.bowler,venue,balls,scoreboards,manofmatch"}, **kwargs)
 
 async def getMatchInfo(match_id, **kwargs):
-    return await sportmonks_cric(f"/fixtures/{match_id}", {"include": "localteam,visitorteam,venue"}, **kwargs)
+    return await sportmonks_cric(f"/fixtures/{match_id}", {"include": "localteam,visitorteam,venue,manofmatch"}, **kwargs)
 
 async def getMatchSquad(match_id, **kwargs):
     return await sportmonks_cric(f"/fixtures/{match_id}", {"include": "lineup"}, **kwargs)
@@ -180,6 +180,43 @@ def _normalize_sportmonks_to_app_format(sm_match):
     local = sm_match.get("localteam", {}).get("name", "Local")
     visitor = sm_match.get("visitorteam", {}).get("name", "Visitor")
     status = sm_match.get("status", "")
+    # Extract Man of the Match
+    mom = sm_match.get("manofmatch")
+    mom_data = None
+    if mom:
+        mom_data = {
+            "name": mom.get("fullname") or mom.get("name"),
+            "id": mom.get("id"),
+            "team_id": mom.get("team_id")
+        }
+
+    # calculate top performers if stats available
+    best_players = []
+    batting = sm_match.get("batting", [])
+    bowling = sm_match.get("bowling", [])
+    
+    if batting:
+        # Sort by runs
+        sorted_bat = sorted(batting, key=lambda x: x.get("score") or x.get("runs") or 0, reverse=True)[:2]
+        for b in sorted_bat:
+             p = b.get("batsman", {})
+             name = p.get("fullname") or p.get("name") or "Unknown"
+             runs = b.get("score") or b.get("runs") or 0
+             balls = b.get("ball") or b.get("balls") or 0
+             best_players.append(f"{name} ({runs} off {balls})")
+
+    if bowling:
+        # Sort by wickets
+        sorted_bowl = sorted(bowling, key=lambda x: x.get("wickets") or 0, reverse=True)[:2]
+        for b in sorted_bowl:
+             w = b.get("wickets") or 0
+             if w > 0:
+                 p = b.get("bowler", {})
+                 name = p.get("fullname") or p.get("name") or "Unknown"
+                 runs_conceded = b.get("runs") or 0
+                 overs = b.get("overs") or 0
+                 best_players.append(f"{name} ({w}/{runs_conceded} in {overs})")
+
     return {
         "id": m_id,
         "name": f"{local} vs {visitor}",
@@ -190,7 +227,10 @@ def _normalize_sportmonks_to_app_format(sm_match):
         "t1": local, "t2": visitor,
         "matchEnded": status in ["Finished", "Completed", "Abandoned"],
         "scoreboards": sm_match.get("scoreboards", []),
-        "scorecard": [] # Populated fully if needed
+        "scoreboards": sm_match.get("scoreboards", []),
+        "man_of_match": mom_data,
+        "top_performers": best_players,
+        "scorecard": [{"inning": "All", "batting": batting, "bowling": bowling}] if (batting or bowling) else []
     }
 
 # --- New Helper ---
@@ -203,7 +243,7 @@ async def fetch_last_finished_match(team_name=None, opponent_name=None, match_ty
     # We fetch a batch of recent fixtures to find the last finished one
     params = {
         "sort": "-starting_at",
-        "include": "localteam,visitorteam,runs,venue",
+        "include": "localteam,visitorteam,runs,venue,manofmatch,bowling.bowler,batting.batsman",
     }
     
     res = await sportmonks_cric("/fixtures", params)

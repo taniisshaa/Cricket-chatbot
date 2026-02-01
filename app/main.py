@@ -14,7 +14,8 @@ from app.ai_core import (
     generate_human_response,
     predict,
     predict_player_performance,
-    predict_live_match
+    predict_live_match,
+    run_reasoning_agent
 )
 
 from app.live_match_service import fetch_realtime_matches
@@ -475,6 +476,7 @@ async def process_user_message(user_query, conversation_history=None):
         "SERIES_STATS": "ANALYTICS.log",
         "SERIES_ANALYTICS": "ANALYTICS.log",
         "PREDICTION": "PREDICTION.log", # New Prediction Log
+        "DEEP_REASONING": "AGENT_REASONING.log",
         "GENERAL": "GENERAL_QUERIES.log"
     }
 
@@ -493,6 +495,18 @@ async def process_user_message(user_query, conversation_history=None):
     # Use this logger for the rest of the function if needed, or rely on service-level logging
     # logic below uses 'logger' variable, let's update it or just let services handle their own
     logger = ctx_logger
+
+    # 🧠 NEW: DEEP REASONING AGENT INTERCEPTION
+    if intent == "DEEP_REASONING":
+        ctx_logger.info("🧠 Triggering ReAct Agent for Deep Reasoning...")
+        try:
+            agent_response = await run_reasoning_agent(user_query, conversation_history)
+            ctx_logger.info(f"ReAct Agent Result: {agent_response}")
+            return agent_response
+        except Exception as e:
+            ctx_logger.error(f"ReAct Agent Failed: {e}")
+            # Fallback to standard flow if agent fails
+            ctx_logger.warning("Falling back to standard router...")
 
     required_tools = analysis.get("required_tools", [])
 
@@ -777,11 +791,18 @@ async def process_user_message(user_query, conversation_history=None):
 
 
                 try:
-                    from dateparser.search import search_dates
-                    found_dates = search_dates(user_query, settings={'PREFER_DATES_FROM': 'past'})
-                    parsed_dt = found_dates[0][1] if found_dates else None
+                    target_date_str = entities.get("target_date")
+                    parsed_dt = None
+                    if target_date_str:
+                         try: parsed_dt = datetime.strptime(target_date_str, "%Y-%m-%d")
+                         except: pass
 
-                    if parsed_dt and (parsed_dt.date() < datetime.now().date()):
+                    if not parsed_dt:
+                        from dateparser.search import search_dates
+                        found_dates = search_dates(user_query, settings={'PREFER_DATES_FROM': 'past'})
+                        parsed_dt = found_dates[0][1] if found_dates else None
+
+                    if parsed_dt and (parsed_dt.date() <= datetime.now().date()):
                         fmt_date = parsed_dt.strftime("%Y-%m-%d")
                         ctx_logger.info(f"📅 Identified specific past date in query: {fmt_date}")
 
