@@ -6,13 +6,17 @@ from app.backend_core import sportmonks_cric, _normalize_sportmonks_to_app_forma
 
 logger = get_logger("upcoming_svc", "UPCOMING_SCHEDULE.log")
 
-async def get_upcoming_matches(days=14):
+async def get_upcoming_matches(days=14, check_date=None):
     """
-    Fetches upcoming fixtures for the next X days.
+    Fetches upcoming fixtures for the next X days or a specific date.
     """
-    today = datetime.now()
-    start_date = today.strftime("%Y-%m-%d")
-    end_date = (today + timedelta(days=days)).strftime("%Y-%m-%d")
+    if check_date:
+        start_date = check_date
+        end_date = check_date
+    else:
+        today = datetime.now()
+        start_date = today.strftime("%Y-%m-%d")
+        end_date = (today + timedelta(days=days)).strftime("%Y-%m-%d")
 
     logger.info(f"Fetching Upcoming Matches: {start_date} to {end_date}")
 
@@ -30,8 +34,34 @@ async def get_upcoming_matches(days=14):
         for m in raw:
             norm = _normalize_sportmonks_to_app_format(m)
 
-            if norm.get("status") not in ["Finished", "Completed", "Abandoned"]:
+            # If looking for a specific date, include ALL matches (even finished ones).
+            # Otherwise (general upcoming), filter out finished matches.
+            if check_date or norm.get("status") not in ["Finished", "Completed", "Abandoned"]:
                  matches.append(norm)
+
+    # Fallback: If specific date requested but no matches found, check +/- 2 days
+    if not matches and check_date:
+        logger.info(f"No matches found on {check_date}, expanding search +/- 2 days...")
+        try:
+            dt_obj = datetime.strptime(check_date, "%Y-%m-%d")
+            start_exp = (dt_obj - timedelta(days=2)).strftime("%Y-%m-%d")
+            end_exp = (dt_obj + timedelta(days=2)).strftime("%Y-%m-%d")
+            
+            res_exp = await sportmonks_cric("/fixtures", {
+                "filter[starts_between]": f"{start_exp},{end_exp}",
+                "include": includes,
+                "sort": "starting_at"
+            }, use_cache=True, ttl=300)
+            
+            if res_exp.get("ok"):
+                raw_exp = res_exp.get("data", [])
+                for m in raw_exp:
+                    norm = _normalize_sportmonks_to_app_format(m)
+                    # For fallback, we return what we find to be helpful
+                    norm["note"] = f"(Originally searched {check_date})"
+                    matches.append(norm)
+        except Exception as e:
+            logger.error(f"Fallback search failed: {e}")
 
     logger.info(f"Found {len(matches)} upcoming matches from {start_date} to {end_date}")
     return {

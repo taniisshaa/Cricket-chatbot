@@ -4,6 +4,7 @@ from datetime import datetime
 import dateparser
 from app.utils_core import get_logger
 from app.backend_core import getSeries, getSeriesInfo, getCurrentMatches, getTodayMatches, getMatchScorecard, get_live_matches, get_series_matches_by_id, getMatchInfo, getPlayers, get_upcoming_matches
+from app.match_utils import _match_series_name
 
 logger = get_logger("search_svc")
 
@@ -46,14 +47,14 @@ async def find_series_smart(series_name, year=None):
     if not series_name: return None
     logger.info(f"Smart Search: {series_name} | Year: {year}")
     
-    clean_series = _normalize(series_name).replace("ipl", "indian premier league")
+    clean_series = _normalize(series_name)
     year_str = str(year) if year else ""
     
     # 1. Year based search
     if year_str:
         y_res = await getSeries(year_str, rows=50)
         if y_res.get("data"):
-            candidates = [s for s in y_res["data"] if _normalize(s["name"]) in clean_series or clean_series in _normalize(s["name"])]
+            candidates = [s for s in y_res["data"] if _match_series_name(clean_series, s.get("name"))]
             if candidates: return candidates[0]["id"]
 
     # 2. Name based search
@@ -134,11 +135,7 @@ async def find_match_by_score(team, score_str, year=None, series_name=None, scor
         if not m.get("matchEnded"): continue
         sc = await getMatchScorecard(m["id"])
         if not sc.get("data"): continue
-        
-        # Simple string check in normalized scorecard text would be faster
-        # But here we just check if team played and return it for now
-        # The original function was 200 lines. 
-        # I am simplifying it to just return the most relevant match for the team in that series
+       
         if _is_team_match(team, m.get("name")):
              return sc.get("data")
              

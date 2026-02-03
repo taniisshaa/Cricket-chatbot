@@ -138,7 +138,7 @@ async def getStandings(series_id, **kwargs):
 async def get_upcoming_matches(**kwargs):
     # Redirect to upcoming_service via import or simple wrapper
     from app.upcoming_service import get_upcoming_matches
-    return await get_upcoming_matches()
+    return await get_upcoming_matches(**kwargs)
 
 async def getCurrentMatches(**kwargs):
     # Combined logic simplified

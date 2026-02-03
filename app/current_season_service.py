@@ -9,14 +9,14 @@ logger = get_logger("ipl_svc", "IPL.log")
 async def get_todays_matches_full(use_cache=True):
     """
     Fetches the full schedule for TODAY (Active + Scheduled + Fininshed today).
-    This logic fulfills 'aaj ke matches'.
+    Includes matches started up to 5 days ago if they are still Active (e.g. Test Matches).
     """
     today_str = datetime.now().strftime("%Y-%m-%d")
     includes = "localteam,visitorteam,runs,venue"
 
     logger.info(f"Fetching Today's Full Schedule: {today_str}")
 
-
+    # 1. Matches starting TODAY
     res = await sportmonks_cric("/fixtures", {
         "filter[starts_between]": f"{today_str},{today_str}",
         "include": includes,
@@ -24,12 +24,39 @@ async def get_todays_matches_full(use_cache=True):
     }, use_cache=use_cache, ttl=120)
 
     matches = []
+    seen_ids = set()
+
     if res.get("ok"):
         raw_data = res.get("data", [])
         for m in raw_data:
             matches.append(_normalize_sportmonks_to_app_format(m))
+            seen_ids.add(m.get("id"))
 
-    logger.info(f"Today's Schedule: Found {len(matches)} matches (Date: {today_str})")
+    # 2. Matches started in last 5 days (that might be ongoing)
+    try:
+        past_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        res_ongoing = await sportmonks_cric("/fixtures", {
+            "filter[starts_between]": f"{past_date},{yesterday}",
+            "include": includes,
+        }, use_cache=use_cache, ttl=300)
+
+        if res_ongoing.get("ok"):
+            raw_ongoing = res_ongoing.get("data", [])
+            for m in raw_ongoing:
+                status = str(m.get("status", "")).lower()
+                # Check for active statuses
+                active_statuses = ["live", "stumps", "break", "tea", "lunch", "dinner", "innings", "delayed", "interrupted"]
+                
+                if any(s in status for s in active_statuses) and "finished" not in status and "completed" not in status:
+                    if m.get("id") not in seen_ids:
+                        matches.append(_normalize_sportmonks_to_app_format(m))
+                        seen_ids.add(m.get("id"))
+    except Exception as e:
+        logger.error(f"Error fetching ongoing multi-day matches: {e}")
+
+    logger.info(f"Today's Full Schedule (inc. ongoing): Found {len(matches)} matches")
     
     return {
         "ok": True,

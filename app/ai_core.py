@@ -254,11 +254,12 @@ Your goal is to classify intent dynamically based on **Linguistic Tense** and **
    - Note: This is distinct from general stats; it asks for a specific historical feat.
 
 8. **DEEP_REASONING (Complex/Multi-step)**:
-   - **Signal**: Questions requiring multiple steps or logical deduction.
+   - **Signal**: Questions requiring multiple steps, logical deduction, or labeled as "tricky"/"twisted".
    - Examples: 
      - "Who was the Man of the Match in the last game India played against Australia?" (Find Match -> Get MOM).
      - "Compare the strike rate of Kohli and Rohit in the last 5 matches." (Find Matches -> Get Stats -> Compare).
      - "Did Mumbai win the match where Pollard scored 60?" (Find Match by Player Score -> Check Result).
+     - "Ghuma fira kar pucho toh" or "Tricky question": Use ReAct.
    - **Logic**: If the answer isn't a direct lookup but a *process*, use this.
 
 [CONTEXTUAL RESOLUTION - "MEMORY MODE"]
@@ -433,6 +434,8 @@ Your job is to deeply and thoroughly research past match data to provide a compr
 7.  **Season Match Totals**: If `historical_season_totals` is present, list the top scores/lowest scores and the teams involved.
 8.  **Team Season Summary**: If `historical_team_season_summary` is provided, use it to explain a team's journey. Mention their win count, top performers (runs/wickets), and match results. Use this to answer "Why did [Team] lose/win?" questions.
 9.  **Detailed Scorecards**: If `historical_match_focus` has a `details` or `scorecard` field, extract BATSMAN-wise or BOWLER-wise stats to give a professional answer. Mention strikes rates and economy.
+10. **"Why" & Performance**: For queries like "Why did CSK lose?" or "How did MI perform?", combine `historical_team_season_summary` (Win/Loss ratio) with `top_performers`. If a key player failed or the team lost many close games, mention that.
+11. **Close Matches**: For "Last ball finish", scan the match list for margins like "won by 1 run", "won by 1 wicket", or "won off the last ball". Narrate the drama.
 
 [DATABASE SCHEMA & FEATURES (legacy_ipl_wpl.db)]
 You are integrated with an IPL/WPL archive. Use this knowledge to interpret provided stats:
@@ -446,28 +449,63 @@ You are integrated with an IPL/WPL archive. Use this knowledge to interpret prov
 - ❌ **PAST TENSE ONLY**: The match is OVER. Use past tense verbs (e.g., "won", "scored").
 - ❌ **NO LIVE DATA**: Do not confuse a match from 2023 with a live score happening today.
 - ❌ **NO HALLUCINATION**: If the [API DATA] is empty, say: "इस मैच का विवरण उपलब्ध नहीं है।"
-- ✅ **LANGUAGE RULE (GRAMMAR BASED)**:
-  - If input has **Hindi Grammar** (Postpositions like 'ka, ki, me' or verbs at end):
-  - **RESPOND IN DEVANAGARI HINDI ONLY**.
-  - ❌ "Mumbai ne match jeeta"
-  - ✅ "मुंबई इंडियंस ने मैच जीता।"
+- **LANGUAGE LOGIC**:
+  - Default: **ENGLISH**.
+  - **Only** switch to Hindi (Devanagari) if the user's input is explicitly in Hindi/Hinglish (e.g., "Kaun jeeta?", "Score batao").
+  - If input is English ("Who won?"), output MUST be ENGLISH.
 
 [STYLE]
-- **Casual but Authoritative**: Like a friend who knows every stat by heart.
-- **Short & Sharp**: 2-3 lines max.
+- **Casual but Authoritative**: Like an expert commentator.
+- **Length Constraint**: STRICTLY under 150 tokens. NO intros/outros like "Here is the info" or "Let me tell you". Just the facts and the story.
+- **Directness**: Start with the result/answer immediately.
 - **Emoji Use**: Use vintage or record-related emojis (🏆📜🏏🐐).
 """
 
 async def analyze_intent(user_query, history=None):
     logger.info(f"ROUTER INPUT > Query: {user_query}")
     client = get_ai_client()
-    messages = [{"role": "system", "content": INTENT_SYSTEM_PROMPT}]
+    # 🧠 NEW: Inject Schema-Aware Instructions
+    SCHEMA_INSTRUCT = f"""
+    [TASK UPDATE]
+    You must now also output a 'structured_schema' object in your JSON response for complex/past queries.
+    
+    [SCHEMA DEFINITION]
+    "structured_schema": {{
+      "query_type": "fact" | "comparison" | "trend" | "reasoning" | "ranking" | "stats_lookup",
+      "tournament": "string or null",
+      "season": "integer or null",
+      "teams": ["string"],
+      "players": ["string"],
+      "match_type": "string or null",
+      "metrics": ["winner", "runs", "wickets", "sixes", "fours", "boundaries", "centuries", "fifties", "strike_rate", "economy", "points", "standings"],
+      "filters": {{
+         "phase": "string or null (powerplay, death, league_stage)",
+         "venue": "string or null",
+         "limit": "integer",
+         "match_result": "string or null",
+         "stat_category": "string or null"
+      }},
+      "ambiguity": boolean
+    }}
+    
+    [MAPPING RULES]
+    - "Powerplay" -> filters.phase="powerplay"
+    - "Orange Cap" -> metrics=["runs"], query_type="ranking"
+    - "Compare Squads" -> intent="SQUAD_COMPARISON"
+    - "Fastest 50" -> filters.stat_category="fastest_fifty"
+    - "IPL 2025" -> tournament="IPL", season=2025
+    """
+    
+    final_prompt = INTENT_SYSTEM_PROMPT + "\n" + SCHEMA_INSTRUCT
+    
+    messages = [{"role": "system", "content": final_prompt}]
     if history: messages.extend(history[-10:])
     messages.append({"role": "user", "content": user_query})
     try:
         response = await client.chat.completions.create(
             model=get_model_name(),
             messages=messages,
+            response_format={"type": "json_object"}
         )
         raw_content = response.choices[0].message.content
         if "```json" in raw_content:
@@ -479,13 +517,32 @@ async def analyze_intent(user_query, history=None):
         intent_upper = result.get("intent", "GENERAL").upper()
         time_ctx = result.get("time_context", "PRESENT").upper()
 
-        tools = []
+        # --- BACKWARD COMPATIBILITY: POPULATE ENTITIES FROM SCHEMA ---
+        struct = result.get("structured_schema")
+        if struct:
+             # If exact entities are missing but schema has them, fill them
+             ents = result.get("entities", {})
+             if not ents.get("series") and struct.get("tournament"): ents["series"] = struct["tournament"]
+             if not ents.get("year") and struct.get("season"): ents["year"] = struct["season"]
+             if not ents.get("team") and struct.get("teams"): ents["team"] = struct["teams"][0]
+             if not ents.get("opponent") and struct.get("teams") and len(struct["teams"]) > 1: ents["opponent"] = struct["teams"][1]
+             if not ents.get("player") and struct.get("players"): ents["player"] = struct["players"][0]
+             
+             result["entities"] = ents
 
+        tools = []
 
         if intent_upper in ["LIVE_MATCH", "LIVE_ANALYSIS", "GENERAL"]:
             tools.append("get_live_matches")
 
         elif intent_upper == "PAST_HISTORY":
+            # For schema-aware queries, we use the new SMART QUERY tool logic
+            tools.append("execute_smart_query") # New Tool Flag
+            # Keep fallbacks
+            tools.append("get_series_info")
+            tools.append("search_historical_matches")
+            
+            # Check for recent past manually
             entities = result.get("entities", {})
             target_date_str = entities.get("target_date")
             is_recent = False
@@ -493,21 +550,9 @@ async def analyze_intent(user_query, history=None):
                 try:
                     t_date = datetime.strptime(target_date_str, "%Y-%m-%d").date()
                     delta = (t_date - _TODAY_OBJ).days
-                    if -7 <= delta <= 1:
-                        is_recent = True
-                except:
-                    pass
-
-            if is_recent:
-                tools.append("get_live_matches")
-                # Fallback tools for searching archives
-                tools.append("get_series_info")
-                tools.append("search_historical_matches")
-            else:
-                tools.append("get_series_info")
-                tools.append("get_series_analytics")
-                tools.append("get_season_leaders")
-                tools.append("search_historical_matches")
+                    if -7 <= delta <= 1: is_recent = True
+                except: pass
+            if is_recent: tools.append("get_live_matches")
 
         elif intent_upper == "UPCOMING":
             tools.append("get_upcoming_matches")
@@ -532,6 +577,7 @@ async def analyze_intent(user_query, history=None):
 
         elif intent_upper in ["PLAYER_STATS", "SERIES_STATS", "SERIES_ANALYTICS"]:
             tools.append("get_live_matches")
+            tools.append("execute_smart_query")
             tools.append("get_series_info")
             tools.append("get_series_analytics")
             tools.append("get_points_table")
@@ -550,9 +596,6 @@ async def analyze_intent(user_query, history=None):
     except Exception as e:
         logger.error(f"Intent Analysis Error: {e}")
         return {"intent": "general", "required_tools": ["get_live_matches"], "entities": {}, "time_context": "PRESENT"}
-
-    except Exception as e:
-        return {"intent": "general", "required_tools": ["get_live_matches"], "entities": {}}
 
 
 RESEARCH_SYSTEM_PROMPT = """
@@ -594,10 +637,10 @@ PRESENTER_SYSTEM_PROMPT = """
 1. **Extraction**: Read the *Research Brief* or *Raw Data*.
 2. **Handle Ambiguity**: If `ambiguous_matches` or `historical_match_list` is present, follow the ambiguity logic above.
 3. **Formatting**:
-   - **Answer First**: Give the direct answer immediately if clear.
-   - **Short & Crisp**: **MAX 60 WORDS**.
-   - **Reasoning**: Use the "Analysis" from Agent 1 to explain why.
-   - **Style**: Casual, Cricket-loving friend.
+   - **Answer First**: Give the direct answer immediately (e.g., "India won by 5 wickets").
+   - **Length Constraint**: STRICTLY keep response under 150 tokens (approx 100 words). NO fluff like "I am thrilled to tell you" or "What a match it was". Cut straight to the stats and result.
+   - **Reasoning**: Use the "Analysis" from Agent 1 to explain *why*, but keep it punchy.
+   - **Style**: Expert, direct, and high-energy.
    - **Language**:
      - English Query -> **Strictly English**.
      - Hindi/Hinglish Query -> **SHUDDH HINDI (DEVANAGARI)**.
@@ -632,7 +675,7 @@ async def generate_human_response(api_results, user_query, analysis, conversatio
     
     # --- STEP 1: RAG RETRIEVAL (Data Extraction) ---
     data_summary = []
-    priorities = ["live_win_prediction", "prediction_analysis", "prediction_report", "specialist_analytics", "match_live_state", "final_match_scorecard", "final_match_info", "historical_match_focus", "series_analytics", "found_score_match", "specific_player_stats", "match_details", "scorecard", "date_scorecards", "player_perf", "player_past_performance", "head_to_head_history", "series_winner_info", "standings"]
+    priorities = ["smart_query_result", "live_matches", "upcoming_schedule", "generic_today_data", "live_win_prediction", "prediction_analysis", "prediction_report", "specialist_analytics", "match_live_state", "final_match_scorecard", "final_match_info", "historical_match_focus", "historical_db_series_summary", "historical_team_season_summary", "series_analytics", "found_score_match", "specific_player_stats", "match_details", "scorecard", "date_scorecards", "player_perf", "player_past_performance", "head_to_head_history", "series_winner_info", "standings"]
     
     t_name = str(analysis.get("entities", {}).get("team") or "").lower()
     p_name = str(analysis.get("entities", {}).get("player") or "").lower()
@@ -798,6 +841,7 @@ When you have the answer, output:
 2. If tool returns multiple matches, pick the most relevant one (usually the latest one).
 3. If tool returns explicit details (like "India won"), you don't need to call more tools unless the user asked for specific player stats.
 4. **Current Date**: {TODAY}. Current Year: {CURRENT_YEAR}.
+5. **Length Constraint**: The "final_answer" MUST be between 150 and 200 tokens. Provide a comprehensive yet concise answer.
 """
 
 class ReActAgent:
@@ -900,9 +944,17 @@ class ReActAgent:
             
             elif tool_name == "get_player_stats":
                 name = args.get("player_name")
-                # Basic player search for now
-                res = await getPlayers(search=name)
+                from app.history_service import get_player_past_performance
+                # Use history service for detailed stats
+                res = await get_player_past_performance(name)
                 return res
+
+            elif tool_name == "find_match_by_event":
+                # New tool for "Match where X happened"
+                from app.search_service import find_match_by_score
+                team = args.get("team")
+                score_desc = args.get("description") # e.g. "century", "100 runs"
+                return await find_match_by_score(team, score_desc)
                 
             else:
                 return {"error": f"Unknown tool '{tool_name}'"}
