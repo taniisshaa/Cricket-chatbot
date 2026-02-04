@@ -9,17 +9,13 @@ def get_logger(name="app", log_file=None):
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
 
-    # Check if handlers are already added to avoid duplicates
     if not logger.handlers:
-        # Create formatter
         formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
-        # Console Handler
         c_handler = logging.StreamHandler()
         c_handler.setFormatter(formatter)
         logger.addHandler(c_handler)
 
-        # File Handler (if log_file provided)
         if log_file:
             log_dir = "logs"
             if not os.path.exists(log_dir):

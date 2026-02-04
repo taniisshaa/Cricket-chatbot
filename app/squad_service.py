@@ -24,21 +24,17 @@ def normalize_team_name(team_input: str) -> str:
         
         input_lower = team_input.lower().strip()
         
-        # 1. Exact
         for team in all_teams:
             if team.lower() == input_lower: return team
             
-        # 2. Partial
         for team in all_teams:
             if input_lower in team.lower(): return team
             
-        # 3. Initials
         for team in all_teams:
             words = team.split()
             initials = ''.join([w[0] for w in words if w]).lower()
             if input_lower == initials: return team
             
-        # 4. Word match
         for team in all_teams:
             if input_lower in team.lower().split(): return team
             

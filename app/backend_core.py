@@ -55,7 +55,6 @@ async def sportmonks_cric(endpoint, params=None, use_cache=True, ttl=60, **kwarg
     params["api_token"] = sm_key
     client = await _get_client()
     
-    # Use a longer timeout for complex includes
     timeout = httpx.Timeout(45.0, connect=10.0)
     
     try:
@@ -65,7 +64,6 @@ async def sportmonks_cric(endpoint, params=None, use_cache=True, ttl=60, **kwarg
             if use_cache: _save_to_cache(cache_key, result)
             return result
         
-        # Fallback: If it's a timeout or 500-range error, try without some includes if possible
         if r.status_code >= 500 and "include" in params:
              logger.warning(f"Complex API call failed ({r.status_code}), retrying with simplified query...")
              simple_params = params.copy()
@@ -77,7 +75,6 @@ async def sportmonks_cric(endpoint, params=None, use_cache=True, ttl=60, **kwarg
         return {"ok": False, "status": r.status_code, "error": r.text[:200]}
     except (httpx.TimeoutException, httpx.NetworkError) as e:
         logger.error(f"API Connection Error on {endpoint}: {e}")
-        # Try one last time with NO includes if it was a timeout
         if "include" in params:
              try:
                  simple_params = params.copy()
@@ -90,7 +87,6 @@ async def sportmonks_cric(endpoint, params=None, use_cache=True, ttl=60, **kwarg
     except Exception as e:
         return {"ok": False, "status": 0, "error": str(e)}
 
-# --- Wrappers ---
 async def getSeries(search=None, **kwargs):
     params = {"search": search} if search else {}
     return await sportmonks_cric("/leagues", params, **kwargs)
@@ -129,19 +125,14 @@ async def getPlayers(search=None, **kwargs):
     params = {"filter[lastname]": search} if search else {}
     return await sportmonks_cric("/players", params, **kwargs)
 
-async def getPlayersInfo(player_id, **kwargs):
-    return await sportmonks_cric(f"/players/{player_id}", {"include": "country,career"}, **kwargs)
-
 async def getStandings(series_id, **kwargs):
     return await sportmonks_cric(f"/standings/season/{series_id}", {}, **kwargs)
 
 async def get_upcoming_matches(**kwargs):
-    # Redirect to upcoming_service via import or simple wrapper
-    from app.upcoming_service import get_upcoming_matches
-    return await get_upcoming_matches(**kwargs)
+    from app.upcoming_service import get_upcoming_matches as svc_upcoming
+    return await svc_upcoming(**kwargs)
 
 async def getCurrentMatches(**kwargs):
-    # Combined logic simplified
     from app.live_match_service import fetch_realtime_matches
     from app.current_season_service import get_todays_matches_full, get_matches_by_date
     
@@ -155,7 +146,6 @@ async def getCurrentMatches(**kwargs):
     today = await get_todays_matches_full()
     
     combined = live + today.get("data", [])
-    # Unique by ID
     seen = set()
     unique = []
     for m in combined:
@@ -173,14 +163,11 @@ async def get_series_matches_by_id(series_id, **kwargs):
     res = await getSeriesInfo(series_id, **kwargs)
     return {"data": res.get("data", {}).get("matchList", [])}
 
-# --- Normalization ---
 def _normalize_sportmonks_to_app_format(sm_match):
-    # Simplified normalization to keep lines down
     m_id = sm_match.get("id")
     local = sm_match.get("localteam", {}).get("name", "Local")
     visitor = sm_match.get("visitorteam", {}).get("name", "Visitor")
     status = sm_match.get("status", "")
-    # Extract Man of the Match
     mom = sm_match.get("manofmatch")
     mom_data = None
     if mom:
@@ -190,13 +177,11 @@ def _normalize_sportmonks_to_app_format(sm_match):
             "team_id": mom.get("team_id")
         }
 
-    # calculate top performers if stats available
     best_players = []
     batting = sm_match.get("batting", [])
     bowling = sm_match.get("bowling", [])
     
     if batting:
-        # Sort by runs
         sorted_bat = sorted(batting, key=lambda x: x.get("score") or x.get("runs") or 0, reverse=True)[:2]
         for b in sorted_bat:
              p = b.get("batsman", {})
@@ -206,7 +191,6 @@ def _normalize_sportmonks_to_app_format(sm_match):
              best_players.append(f"{name} ({runs} off {balls})")
 
     if bowling:
-        # Sort by wickets
         sorted_bowl = sorted(bowling, key=lambda x: x.get("wickets") or 0, reverse=True)[:2]
         for b in sorted_bowl:
              w = b.get("wickets") or 0
@@ -233,14 +217,12 @@ def _normalize_sportmonks_to_app_format(sm_match):
         "scorecard": [{"inning": "All", "batting": batting, "bowling": bowling}] if (batting or bowling) else []
     }
 
-# --- New Helper ---
 async def fetch_last_finished_match(team_name=None, opponent_name=None, match_type=None):
     """
     Fetches the most recent finished match, optionally filtering by team name and opponent.
     """
     logger.info(f"Fetching last finished match. Team: {team_name} | Opponent: {opponent_name}")
     
-    # We fetch a batch of recent fixtures to find the last finished one
     params = {
         "sort": "-starting_at",
         "include": "localteam,visitorteam,runs,venue,manofmatch,bowling.bowler,batting.batsman",
@@ -256,7 +238,6 @@ async def fetch_last_finished_match(team_name=None, opponent_name=None, match_ty
     o_filter = (opponent_name or "").lower().strip()
     
     for m in matches:
-        # Check if actually finished
         status = str(m.get("status", "")).lower()
         if status not in ["finished", "completed"] and "won" not in status:
              continue
@@ -264,7 +245,6 @@ async def fetch_last_finished_match(team_name=None, opponent_name=None, match_ty
         t1 = m.get("localteam", {}).get("name", "").lower()
         t2 = m.get("visitorteam", {}).get("name", "").lower()
 
-        # Complex Match Logic
         match_hit = False
         if not t_filter:
             match_hit = True
@@ -279,11 +259,9 @@ async def fetch_last_finished_match(team_name=None, opponent_name=None, match_ty
         
     return None
 
-# --- API Dispatcher ---
 async def cricket_api(intent, **kwargs):
     logger.info(f"API Dispatch: {intent}")
     try:
-        # Import Services inside to avoid circular deps
         from app.live_match_service import get_live_match_details, fetch_match_context_bundle, fetch_realtime_matches
         from app.search_service import find_match_id, find_series_smart
         from app.analytics_service import get_series_analytics, get_head_to_head_statistics
@@ -312,7 +290,6 @@ async def cricket_api(intent, **kwargs):
         logger.error(f"API Error: {e}")
         return {"error": str(e)}
 
-# Aliases for compatibility
 get_series_info = getSeriesInfo
 get_match_scorecard = getMatchScorecard
 get_series_standings = getStandings

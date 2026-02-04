@@ -5,7 +5,7 @@ import sqlite3
 import asyncio
 from datetime import datetime
 from app.utils_core import get_logger
-from app.backend_core import sportmonks_cric, _normalize_sportmonks_to_app_format
+from app.backend_core import sportmonks_cric
 from app.search_service import find_series_smart, find_player_id, _normalize
 
 logger = get_logger("history_svc", "PAST_HISTORY.log")
@@ -28,7 +28,6 @@ async def get_player_past_performance(player_name, series_name=None, year=None):
     conn = get_history_conn()
     cursor = conn.cursor()
 
-    # Base Query on player_stats
     query = """
         SELECT ps.*, m.name as match_name, m.date, m.venue, s.name as series_name, s.year
         FROM player_stats ps
@@ -95,7 +94,6 @@ async def get_series_history_summary(series_name, year=None):
     conn = get_history_conn()
     cursor = conn.cursor()
 
-    # Dynamic Series Search Logic
     conn = get_history_conn()
     cursor = conn.cursor()
     
@@ -107,7 +105,6 @@ async def get_series_history_summary(series_name, year=None):
         
     all_series = [dict(r) for r in cursor.fetchall()]
     
-    # Filter using logic
     tgt_series = None
     if series_name:
         for s in all_series:
@@ -115,8 +112,6 @@ async def get_series_history_summary(series_name, year=None):
                 tgt_series = s
                 break
     elif year and len(all_series) > 0:
-        # If no name but year provided, maybe return the biggest one? 
-        # But safer to return None if ambiguity
         pass
 
     if not tgt_series:
@@ -142,22 +137,16 @@ async def get_series_history_summary(series_name, year=None):
                     pass
             series_data['final_match'] = final_data
             
-            # Infer Series Winner from Final Match
-            # Note: winner_team_id is now the column, usually stores ID but can store name depending on sync logic (earlier we stored name in match_winner) 
-            # If it's an ID, we might need name from `final_data['details']['matchWinner']`
             
             w_col = final_data.get('winner_team_id')
             if w_col:
                 series_data['winner'] = w_col 
-                # If w_col is an ID (digits), we try to get Name from details
                 if str(w_col).isdigit() and final_data.get('details'):
                      series_data['winner'] = final_data['details'].get('matchWinner') or w_col
 
             elif "won by" in str(final_data.get('status', '')).lower():
-                # Extract from status if needed
                 pass
         
-        # Calculate Standings / Points Table
         cursor.execute("SELECT name, status, winner_team_id FROM matches WHERE series_id=?", [series_id])
         all_matches = cursor.fetchall()
         
@@ -166,7 +155,6 @@ async def get_series_history_summary(series_name, year=None):
         series_data['total_matches'] = total_matches
         
         for m in all_matches:
-            # Extract team names from match name "A vs B"
             parts = m['name'].split(" vs ")
             if len(parts) == 2:
                 t1, t2 = parts[0].strip(), parts[1].strip()
@@ -180,7 +168,6 @@ async def get_series_history_summary(series_name, year=None):
                     points[t1]["p"] += 1; points[t1]["nr"] += 1
                     points[t2]["p"] += 1; points[t2]["nr"] += 1
                 elif winner:
-                    # If match_winner stores name
                     if t1 in winner: 
                         points[t1]["p"] += 2; points[t1]["w"] += 1
                         points[t2]["l"] += 1
@@ -189,7 +176,6 @@ async def get_series_history_summary(series_name, year=None):
                         points[t1]["l"] += 1
                     elif winner in points: # exact match
                          points[winner]["p"] += 2; points[winner]["w"] += 1
-                         # lose for other?
                          other = t2 if winner == t1 else t1
                          if other in points: points[other]["l"] += 1
         
@@ -230,26 +216,20 @@ async def get_historical_match_details(match_query_or_teams, year=None):
 
     if "final" in match_query_or_teams.lower():
         if year:
-             # Logic: Find series for year -> Get last match
              s_query = "SELECT id, name FROM series WHERE CAST(year AS TEXT)=?"
              cursor.execute(s_query, (str(year),))
              series_rows = [dict(r) for r in cursor.fetchall()]
              
              target_s_id = None
-             # Try to match series name from query
              for s in series_rows:
-                 # Check if any part of the query matches the series
-                 # e.g. "IPL" in "IPL 2025 Final" -> Matches "Indian Premier League" via acronym logic
                  if _match_series_name(match_query_or_teams, s['name']):
                      target_s_id = s['id']
                      break
              
-             # Fallback: If only one series exists for that year, assume it's that one
              if not target_s_id and len(series_rows) == 1:
                  target_s_id = series_rows[0]['id']
             
              if target_s_id:
-                 # Get the last match of that series -> Determine it is the final
                  cursor.execute("SELECT * FROM matches WHERE series_id=? ORDER BY date DESC LIMIT 1", (target_s_id,))
                  match_row = cursor.fetchone()
                  if match_row:
@@ -277,7 +257,6 @@ async def get_historical_match_details(match_query_or_teams, year=None):
         return None
 
 
-    # Prefer matches with data_json present
     match_data = None
     for row in rows:
         row_dict = dict(row)
@@ -314,31 +293,24 @@ async def search_historical_matches(query=None, team=None, year=None, date=None,
     conditions = []
     params = []
 
-    # 1. Text Query (e.g. "Final", "Qualifier", or team names embedded)
     if query:
         conditions.append("m.name LIKE ?")
         params.append(f"%{query}%")
     
-    # 2. Team Filter (Check both sides)
     if team:
         conditions.append("(m.name LIKE ? OR m.name LIKE ?)")
-        # Simple heuristic: team name appears in match string
         params.append(f"%{team}%")
         params.append(f"%{team}%")
 
-    # 3. Year Filter
     if year:
         conditions.append("CAST(s.year AS TEXT) = ?")
         params.append(str(year))
         
-    # 4. Date Filter
     if date:
         conditions.append("m.date = ?")
         params.append(str(date))
         
-    # 5. Series Filter (Logic based)
     if series:
-        # We need to find the series ID or name first that matches
          cursor.execute("SELECT id, name FROM series") # Load all (cached ideally, but okay for now)
          all_s = cursor.fetchall()
          valid_ids = []
@@ -351,7 +323,6 @@ async def search_historical_matches(query=None, team=None, year=None, date=None,
              conditions.append(f"s.id IN ({placeholders})")
              params.extend(valid_ids)
          else:
-             # Name match fallback
              conditions.append("s.name LIKE ?")
              params.append(f"%{series}%")
 
@@ -424,7 +395,6 @@ async def get_season_leaders(year, category="points", series_name=None):
     params = [str(year)]
     
     if series_name:
-         # Logic based ID resolution
          cursor.execute("SELECT id, name FROM series WHERE CAST(year AS TEXT)=?", (str(year),))
          rows = cursor.fetchall()
          target_ids = []
@@ -510,7 +480,6 @@ async def get_season_match_stats(year, type="highest", series_name=None):
     params = [str(year)]
     
     if series_name:
-         # Logic based ID resolution
          cursor.execute("SELECT id, name FROM series WHERE CAST(year AS TEXT)=?", (str(year),))
          rows = cursor.fetchall()
          target_ids = []
@@ -548,7 +517,6 @@ async def get_team_season_summary(team_name, year):
     conn = get_history_conn()
     cursor = conn.cursor()
     
-    # 1. Matches played and results
     query = """
         SELECT name, starting_at as date, status, winner_team_id, venue
         FROM matches m
@@ -560,7 +528,6 @@ async def get_team_season_summary(team_name, year):
         cursor.execute(query, (str(year), f"%{team_name}%", f"%{team_name}%"))
         matches = [dict(row) for row in cursor.fetchall()]
         
-        # 2. Top performers for this team
         stats_query = """
             SELECT ps.name, SUM(ps.runs) as total_runs, SUM(ps.wickets) as total_wickets
             FROM player_stats ps
@@ -574,9 +541,6 @@ async def get_team_season_summary(team_name, year):
         top_players = [dict(row) for row in cursor.fetchall()]
         
         conn.close()
-        # Since matches doesn't have names in winner_team_id, our check if team_name in winner might fail if it's ID
-        # We assume if winner_team_id is numeric, we might have mapped it. For now, we do a weak check or rely on status.
-        # But 'matches' dict has 'winner_team_id'.
         
         wins = 0
         for m in matches:
@@ -584,8 +548,6 @@ async def get_team_season_summary(team_name, year):
              status = str(m.get('status') or "").lower()
              if team_name.lower() in w_id.lower() or f"{team_name} won" in status.lower(): # If it was a name 
                  wins += 1
-             # If strictly ID, we can't count wins without ID-Name map. 
-             # However, status usually says "X won by Y runs"
              elif "won" in status and team_name.lower() in status.lower():
                  wins += 1
 
@@ -630,11 +592,9 @@ async def get_season_records(year, user_query):
         return None
 
     try:
-        # Special Handling for Team Totals (Querying 'matches' table instead of 'historical_records')
         if category_key in ["highest_team_total", "lowest_team_total"]:
             sort_order = "DESC" if category_key == "highest_team_total" else "ASC"
             
-            # Find series_id for the year if provided
             series_clause = ""
             params = []
             if year:
@@ -645,7 +605,6 @@ async def get_season_records(year, user_query):
                     series_clause = f"AND m.series_id IN ({placeholders})"
                     params = [r[0] for r in rows]
             
-            # Query scorecards joined with matches
             sql = f"""
                 SELECT sc.runs, sc.team, m.name, m.starting_at, m.venue
                 FROM scorecards sc
@@ -671,10 +630,6 @@ async def get_season_records(year, user_query):
             cursor.execute("SELECT * FROM historical_records WHERE year=? AND category=?", (str(year), category_key))
         else:
             cursor.execute("SELECT * FROM historical_records WHERE category=? ORDER BY year DESC", (category_key,))
-            # All-time search (logic-driven)
-            # For records like 'fastest_fifty', we want the one with the lowest details numeric value if possible
-            # But the table stores strings like '14 balls'. 
-            # We'll just return the top entry or list them for the AI to decide.
             cursor.execute("SELECT * FROM historical_records WHERE category=? ORDER BY year DESC", (category_key,))
         
         rows = cursor.fetchall()
@@ -683,7 +638,6 @@ async def get_season_records(year, user_query):
         if not rows: return None
         
         results = [dict(r) for r in rows]
-        # If searching all-time, we return the whole list for the Research Agent to pick the absolute best
         return results if not year else results[0]
     except Exception as e:
         logger.error(f"Error in get_season_records: {e}")
@@ -697,8 +651,6 @@ async def sync_historical_series(series_id):
     """
     logger.info(f"Syncing Historical Series: {series_id}")
 
-    # Fetch simple fixture list first
-    # 1. Fetch Season & League Info
     res = await sportmonks_cric(f"/seasons/{series_id}", {"include": "league"})
     
     data = {}
@@ -706,7 +658,6 @@ async def sync_historical_series(series_id):
 
     if res.get("ok"):
         data = res.get("data", {})
-        # Then fetch fixtures separately with needed includes
         res_fix = await sportmonks_cric("/fixtures", {
             "filter[season_id]": series_id,
             "include": "runs,localteam,visitorteam"
@@ -715,14 +666,12 @@ async def sync_historical_series(series_id):
             fixtures = res_fix.get("data", [])
     else:
         logger.warning(f"Full fetch failed for {series_id}, trying split fetch...")
-        # Split fetch: Season Info first
         res_info = await sportmonks_cric(f"/seasons/{series_id}", {"include": "league"})
         if not res_info.get("ok"):
              logger.error(f"Failed to fetch season info for {series_id}: {res_info.get('error')}")
              return False
         data = res_info.get("data", {})
         
-        # Then Fixtures
         res_fix = await sportmonks_cric("/fixtures", {
             "filter[season_id]": series_id,
             "include": "runs,localteam,visitorteam"
@@ -735,13 +684,11 @@ async def sync_historical_series(series_id):
     conn = get_history_conn()
     cursor = conn.cursor()
 
-    # 1. Sync Series Info
     try:
         league_name = data.get("league", {}).get("name", "")
         season_name = data.get("name", "")
         full_name = f"{league_name} {season_name}".strip()
         
-        # Extract Year safely
         import re
         year_match = re.search(r"(\d{4})", season_name)
         year = int(year_match.group(1)) if year_match else None
@@ -759,12 +706,10 @@ async def sync_historical_series(series_id):
     except Exception as e:
         logger.error(f"Error inserting series {series_id}: {e}")
 
-    # 2. Process Matches
     for f in fixtures:
         match_id = str(f.get("id"))
         status = f.get("status")
         
-        # Insert Basic Match Info
         cursor.execute("""
             INSERT OR REPLACE INTO matches (id, series_id, name, status, starting_at, venue, winner_team_id)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -778,7 +723,6 @@ async def sync_historical_series(series_id):
             f.get("winner_team_id")
         ))
 
-        # If match is finished, fetch DEEP details
         if status in ["Finished", "Completed"] or "won" in str(status).lower():
             await save_match_deep_details(match_id, series_id)
 
@@ -793,7 +737,6 @@ async def save_match_deep_details(match_id, series_id):
     """
     logger.info(f"Saving Deep Details for Match: {match_id}")
     
-    # Fetch Full Match Details
     deep_res = await sportmonks_cric(f"/fixtures/{match_id}", {
         "include": "batting.batsman,bowling.bowler,runs,scoreboards,venue,manofmatch,localteam,visitorteam"
     })
@@ -807,11 +750,9 @@ async def save_match_deep_details(match_id, series_id):
     cursor = conn.cursor()
     
     try:
-        # A. Store Full JSON
         json_str = json.dumps(m_data)
         cursor.execute("UPDATE matches SET data_json = ? WHERE id = ?", (json_str, str(match_id)))
         
-        # B. Populate Player Stats
         batting_data = m_data.get("batting", [])
         bowling_data = m_data.get("bowling", [])
         processed_players = {}
@@ -847,7 +788,6 @@ async def save_match_deep_details(match_id, series_id):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (str(match_id), str(pid), stats["name"], stats["runs"], stats["balls"], stats["4s"], stats["6s"], stats["w"], stats["o"], stats["conc"]))
 
-        # C. Populate Scorecards
         scores = m_data.get("runs", [])
         l_id = str(m_data.get("localteam_id"))
         v_id = str(m_data.get("visitorteam_id"))
@@ -865,7 +805,6 @@ async def save_match_deep_details(match_id, series_id):
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (str(match_id), team_n, int(s.get("score") or s.get("runs") or 0), int(s.get("wickets") or 0), float(s.get("overs") or 0), int(s.get("inning") or 1)))
 
-        # D. Fantasy Points
         for pid, stats in processed_players.items():
             pts = stats["runs"] + (stats["w"] * 25) + (stats["4s"] * 1) + (stats["6s"] * 2)
             if stats["runs"] >= 50: pts += 8
@@ -895,7 +834,6 @@ async def sync_recent_finished_matches(days_back=2):
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days_back)
     
-    # Fetch Fixtures
     range_str = f"{start_date.strftime('%Y-%m-%d')},{end_date.strftime('%Y-%m-%d')}"
     res = await sportmonks_cric("/fixtures", {
         "filter[starts_between]": range_str,
@@ -918,7 +856,6 @@ async def sync_recent_finished_matches(days_back=2):
             match_id = str(f.get("id"))
             series_id = str(f.get("season_id") or f.get("league_id"))
             
-            # Insert Stub first if missing
             cursor.execute("""
                 INSERT OR REPLACE INTO matches (id, series_id, name, status, starting_at, venue, winner_team_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -933,7 +870,6 @@ async def sync_recent_finished_matches(days_back=2):
             ))
             conn.commit()
             
-            # Now Deep Save
             saved = await save_match_deep_details(match_id, series_id)
             if saved: synced_count += 1
             
@@ -971,7 +907,6 @@ async def execute_smart_query(schema):
     
     logger.info(f"🧠 SMART QUERY: Type={query_type}, Metrics={metrics}, Filters={filters}")
     
-    # helper to resolve series IDs
     series_ids = []
     if season or tournament:
         sql = "SELECT id FROM series WHERE 1=1"
@@ -988,7 +923,6 @@ async def execute_smart_query(schema):
     results = {}
     
     try:
-        # CASE 1: RANKING / LEADERBOARD (e.g. "Highest run scorer", "Most sixes")
         if query_type == "ranking" or (query_type == "fact" and ("most" in str(struct) or "highest" in str(struct))):
             metric_map = {
                 "runs": "runs", "wickets": "wickets", "sixes": "sixes", 
@@ -1000,7 +934,6 @@ async def execute_smart_query(schema):
             
             if target_metric:
                 limit = filters.get("limit", 5)
-                # Build SQL
                 where_clauses = []
                 params = []
                 if series_ids:
@@ -1030,27 +963,20 @@ async def execute_smart_query(schema):
                 results["ranking"] = rows
                 results["summary"] = f"Found top {len(rows)} players for {target_metric}."
 
-        # CASE 2: FACT / STAT LOOKUP
-        # 2a. Series Stats (Winner, Final, Count)
         if "winner" in metrics or "standings" in metrics or "final" in str(struct):
             s_summary = await get_series_history_summary(tournament, season)
             if s_summary: results["series_summary"] = s_summary
         
-        # 2b. Match Specific (e.g. "Scorecard of Final")
         if struct.get("match_type") == "final":
-             # We rely on search_historical_matches or get_historical_match_details
-             # But let's check specifically for final
              if season:
                  m_final = await get_historical_match_details(f"{tournament or 'IPL'} Final", year=season)
                  if m_final: results["final_match"] = m_final
 
-        # 2c. Player Record (e.g. "Fastest 50")
         stat_cat = filters.get("stat_category")
         if stat_cat:
             recs = await get_season_records(season, stat_cat) 
             if recs: results["records"] = recs
 
-        # CASE 3: COMPARISON (e.g. "Compare MI and CSK")
         if query_type == "comparison" and len(teams) >= 2:
              h2h = await get_head_to_head_history(teams[0], teams[1])
              results["h2h_summary"] = {"total_matches": len(h2h), "data": h2h[:5]}
@@ -1060,9 +986,7 @@ async def execute_smart_query(schema):
                  t2_sum = await get_team_season_summary(teams[1], season)
                  results["season_comparison"] = {teams[0]: t1_sum, teams[1]: t2_sum}
 
-        # CASE 4: CLOSEST MATCHES (Last Ball Finish)
         if filters.get("match_result") == "close_finish":
-            # Search for specific status keywords
             sql = """
                 SELECT * FROM matches 
                 WHERE (status LIKE '%won by 1 run%' OR status LIKE '%won by 1 wicket%' 

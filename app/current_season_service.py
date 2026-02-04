@@ -16,7 +16,6 @@ async def get_todays_matches_full(use_cache=True):
 
     logger.info(f"Fetching Today's Full Schedule: {today_str}")
 
-    # 1. Matches starting TODAY
     res = await sportmonks_cric("/fixtures", {
         "filter[starts_between]": f"{today_str},{today_str}",
         "include": includes,
@@ -32,7 +31,6 @@ async def get_todays_matches_full(use_cache=True):
             matches.append(_normalize_sportmonks_to_app_format(m))
             seen_ids.add(m.get("id"))
 
-    # 2. Matches started in last 5 days (that might be ongoing)
     try:
         past_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -46,7 +44,6 @@ async def get_todays_matches_full(use_cache=True):
             raw_ongoing = res_ongoing.get("data", [])
             for m in raw_ongoing:
                 status = str(m.get("status", "")).lower()
-                # Check for active statuses
                 active_statuses = ["live", "stumps", "break", "tea", "lunch", "dinner", "innings", "delayed", "interrupted"]
                 
                 if any(s in status for s in active_statuses) and "finished" not in status and "completed" not in status:
@@ -74,7 +71,6 @@ async def get_matches_by_date(target_date, team_name=None, use_cache=True):
 
     includes = "localteam,visitorteam,runs,venue,manofmatch,batting.batsman,bowling.bowler"
     
-    # Try exact date first
     res = await sportmonks_cric("/fixtures", {
         "filter[starts_between]": f"{target_date},{target_date}",
         "include": includes
@@ -82,8 +78,6 @@ async def get_matches_by_date(target_date, team_name=None, use_cache=True):
 
     raw_matches = res.get("data", []) if res.get("ok") else []
     
-    # Fallback: If no matches on that exact date, 
-    # search +/- 1 day to account for timezones/delays
     if not raw_matches:
         logger.info(f"No matches found on {target_date}, expanding search window +/- 1 day...")
         try:

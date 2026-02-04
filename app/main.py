@@ -8,16 +8,13 @@ import streamlit as st
 import asyncio
 from datetime import datetime
 
-# Import refactored modules
 from app.ui_components import setup_streamlit_ui
 from app.agent_workflow import process_user_message
 from app.utils_core import save_chat, load_chat, Config, get_logger
 
-# Initialize Config
 Config.ensure_dirs()
 logger = get_logger("app_main", "general_app.log")
 
-# --- Streamlit Session Setup ---
 if "messages" not in st.session_state: st.session_state.messages = load_chat()
 if "processing" not in st.session_state: st.session_state.processing = False
 if "chat_context" not in st.session_state:
@@ -29,10 +26,8 @@ if "chat_context" not in st.session_state:
         "last_player": None
     }
 
-# --- Setup UI ---
 setup_streamlit_ui()
 
-# --- Main App Logic ---
 
 try:
     SMART_ROUTER_ENABLED = True

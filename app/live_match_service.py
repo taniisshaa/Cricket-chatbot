@@ -6,8 +6,6 @@ import hashlib
 from datetime import datetime
 from app.utils_core import get_logger
 from app.backend_core import (
-    sportmonks_cric, 
-    _normalize_sportmonks_to_app_format,
     getMatchScorecard,
     getMatchCommentary,
     getMatchInfo,
@@ -281,7 +279,6 @@ async def fetch_realtime_matches(filter_team=None):
 
     logger.info(f"Fetch Realtime Matches called. Filter: {filter_team}")
     
-    # Check Livescores Endpoint
     if res_live.get("ok"):
          data = res_live.get("data", [])
          logger.info(f"Livescores API returned {len(data)} items")
@@ -304,12 +301,10 @@ async def fetch_realtime_matches(filter_team=None):
     else:
          logger.error(f"Livescores API Failed: {res_live.get('error')}")
 
-    # Fallback to Today's Fixtures if no live matches found
     if not live_matches:
         logger.info("No live matches found in livescores, checking today's fixtures fallback...")
         today_str = datetime.now().strftime("%Y-%m-%d")
         
-        # Include necessary relations
         includes = "localteam,visitorteam,runs,venue,batting,bowling,lineup,balls"
         
         res_today = await sportmonks_live_request(f"/fixtures", {
@@ -384,7 +379,6 @@ def _get_top_performers_by_inning(scorecard):
 async def get_live_match_details(match_id, use_cache=True):
     logger.info(f"Fetching Live Details: {match_id}")
     
-    # Parallel Fetch
     t1 = getMatchScorecard(match_id, ttl=15 if use_cache else 0)
     t2 = getMatchCommentary(match_id, ttl=15 if use_cache else 0)
     t3 = getMatchInfo(match_id, ttl=15 if use_cache else 0)
@@ -406,7 +400,6 @@ async def get_live_match_details(match_id, use_cache=True):
     match_name = info_data.get("name") or data.get("name")
     status = str(info_data.get("status") or data.get("status", "")).lower()
     
-    # Construct Summary
     summary = {
         "match_name": match_name,
         "status": status.title(),
@@ -421,13 +414,11 @@ async def get_live_match_details(match_id, use_cache=True):
         "match_ended": info_data.get("matchEnded") or False
     }
 
-    # Extract Batting/Bowling Team
     curr_inn = data.get("scorecard", [])[-1] if data.get("scorecard") else {}
     if curr_inn:
         inn_name = curr_inn.get("inning", "")
         summary["batting_team"] = inn_name.split(" Inning")[0]
         
-    # Commentary
     if comm.get("data"):
         summary["commentary"] = [c.get("comm", "") for c in comm["data"][:15]]
         
@@ -442,7 +433,6 @@ def calculate_match_odds(match_details):
     wickets = _safe_int(score.get("wickets") or score.get("w"))
     overs = float(score.get("overs") or score.get("o") or 0.0)
     
-    # Simple heuristic
     odds = {"narrative": "Match Balanced"}
     
     if wickets < 3 and overs > 10:

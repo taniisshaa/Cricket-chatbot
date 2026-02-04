@@ -8,7 +8,6 @@ from app.utils_core import get_logger
 from app.ai_core import analyze_intent, run_reasoning_agent, generate_human_response
 from app.match_utils import _normalize, _is_team_match, _smart_ctx_match
 
-# Service Imports
 from app.backend_core import (
     getSeries, get_upcoming_matches, get_todays_matches, get_live_matches,
     get_match_scorecard, get_all_series, get_series_info, get_series_standings,
@@ -34,8 +33,6 @@ from app.live_match_service import (
 )
 from app.squad_service import get_team_squad, compare_team_squads
 
-# Define logger if not available via get_logger redirection inside function
-# We will use function-local loggers as in original code
 
 def update_context(series=None, year=None, team=None, player=None, opponent=None):
     if series: st.session_state.chat_context["last_series"] = series
@@ -49,7 +46,6 @@ async def process_user_message(user_query, conversation_history=None):
 
     base_logger = get_logger()
 
-    # Pre-fetch tasks
     matches_task = asyncio.create_task(get_todays_matches(use_cache=False, ttl=5))
     analysis_task = asyncio.create_task(analyze_intent(user_query, conversation_history))
 
@@ -80,7 +76,6 @@ async def process_user_message(user_query, conversation_history=None):
     else:
         log_name = "GENERAL"
         
-    # Intent to Log File Mapping
     intent_map = {
         "LIVE_MATCH": "LIVE_FEED.log",
         "UPCOMING": "UPCOMING_SCHEDULE.log",
@@ -93,11 +88,9 @@ async def process_user_message(user_query, conversation_history=None):
         "GENERAL": "GENERAL_QUERIES.log"
     }
 
-    # Determine Log File
     log_file = intent_map.get(intent, "GENERAL_QUERIES.log")
     logger_name = log_file.replace(".log", "").lower() + "_logger"
 
-    # Get specific logger for this intent
     ctx_logger = get_logger(logger_name, log_file)
 
     ctx_logger.info(f"=== NEW QUERY START [{datetime.now().strftime('%H:%M:%S')}] ===")
@@ -110,7 +103,6 @@ async def process_user_message(user_query, conversation_history=None):
 
     logger = ctx_logger
 
-    # 🧠 NEW: DEEP REASONING AGENT INTERCEPTION
     if intent == "DEEP_REASONING":
         ctx_logger.info("🧠 Triggering ReAct Agent for Deep Reasoning...")
         try:
@@ -119,7 +111,6 @@ async def process_user_message(user_query, conversation_history=None):
             return agent_response
         except Exception as e:
             ctx_logger.error(f"ReAct Agent Failed: {e}")
-            # Fallback to standard flow if agent fails
             ctx_logger.warning("Falling back to standard router...")
 
     required_tools = analysis.get("required_tools", [])
@@ -194,7 +185,6 @@ async def process_user_message(user_query, conversation_history=None):
         asks_location = entities.get("venue") is not None or intent == "VENUE_QUERY"
         asks_winner = stats_type in ["winner", "scorecard", "final", "standings", "comparison"] or entities.get("match_order") == -1
 
-        # Check for general "fetch all" or broad history requests if no specific entities are found
         is_general_history = "all" in user_query.lower() or "database" in user_query.lower() or "sabhi" in user_query.lower()
         
         if is_general_history and not (has_tournament or has_teams):
@@ -239,14 +229,12 @@ async def process_user_message(user_query, conversation_history=None):
                     if "final" in user_query.lower() and "final" not in clean_term.lower():
                         clean_term += " Final"
 
-                    # 1. Try Specific Search First (Exact Match Name)
                     match_details = await get_historical_match_details(clean_term, year=query_year)
 
                     if match_details:
                          api_results["historical_match_focus"] = match_details
                          ctx_logger.info(f"✅ Found Specific Match Detail in DB: {match_details.get('name')}")
                     else:
-                        # 2. flexible search using all available entities
                         target_d = entities.get("target_date")
                         found_matches = await search_historical_matches(
                             query=clean_term if len(clean_term) > 3 else None,
@@ -374,7 +362,6 @@ async def process_user_message(user_query, conversation_history=None):
                     logger.info(f"Adding player performance context for {p_name} in H2H")
                     api_results["player_perf_context"] = await get_player_recent_performance(p_name)
                 
-                # Fetch statistics too
                 api_results["head_to_head_stats"] = await get_head_to_head_statistics(
                     team_a=t_name,
                     team_b=o_name,
@@ -634,8 +621,6 @@ async def process_user_message(user_query, conversation_history=None):
 
             elif tool in ["get_upcoming_matches", "get_upcoming_match"]:
                  if "upcoming_schedule" not in api_results:
-                     # Only pass a specific date if the user explicitly mentioned it (found in entities)
-                     # Otherwise, let the service default to the next 14 days.
                      force_date = entities.get("target_date")
                      upcoming_res = await get_upcoming_matches(check_date=force_date)
                      api_results["upcoming_schedule"] = upcoming_res.get("data", [])[:15]
@@ -711,14 +696,11 @@ async def process_user_message(user_query, conversation_history=None):
             ctx_logger.error(f"Tool {tool} execution failed: {e}")
 
     if intent == "LIVE_MATCH" or any(tool in ["get_live_matches"] for tool in required_tools):
-        # 1. Try Fetching Strictly Live Matches first
         live_data = await get_live_matches()
         
-        # 2. If live matches exist, prioritize them
         if live_data and live_data:
              api_results["live_matches"] = live_data
         
-        # 3. Always fetch today's schedule as context/fallback
         if matches_task is not None:
             m_data = await matches_task
         else:

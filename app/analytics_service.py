@@ -17,7 +17,6 @@ async def get_series_final_info(series_id):
     return None
 
 async def get_player_recent_performance(player_name, series_id=None):
-    # Simplified version
     return None # Placeholder
 
 async def handle_tournament_specialist_logic(analysis, user_query, series_name=None, year=None):
@@ -46,7 +45,6 @@ async def extract_series_winner(series_id, matches=None):
     final_match = completed_matches[-1]
     winner = final_match.get("winner") or final_match.get("matchWinner")
     
-    # Calculate points table
     points_table = {}
     for m in matches:
         t1, t2 = m.get("t1"), m.get("t2")
@@ -89,7 +87,6 @@ async def get_series_analytics(series_id, deep_scan=True, segment=None, limit=No
     
     analytics["matches_analyzed"] = len(completed)
     
-    # Chunked fetching for deep scan
     tasks = []
     chunk_size = 10
     
@@ -104,7 +101,6 @@ async def get_series_analytics(series_id, deep_scan=True, segment=None, limit=No
         if isinstance(sc, Exception) or not sc.get("data"): continue
         data = sc["data"]
         
-        # Team Scores
         for inn in data.get("scorecard", []):
             try:
                 r = int(inn.get("totals", {}).get("R") or 0)
@@ -112,7 +108,6 @@ async def get_series_analytics(series_id, deep_scan=True, segment=None, limit=No
                 if r > analytics["highest_score"]["runs"]:
                     analytics["highest_score"] = {"runs": r, "team": team, "match": data.get("name")}
                     
-                # Player Stats
                 for b in inn.get("batting", []):
                     p_name = b.get("batsman", {}).get("name")
                     runs = int(b.get("r") or 0)
@@ -126,7 +121,6 @@ async def get_series_analytics(series_id, deep_scan=True, segment=None, limit=No
                         analytics["most_wickets"][p_name] = analytics["most_wickets"].get(p_name, 0) + w
             except: pass
 
-    # Sort leaders
     analytics["batting_leaders"] = sorted(analytics["most_runs"].items(), key=lambda x: x[1], reverse=True)[:5]
     analytics["bowling_leaders"] = sorted(analytics["most_wickets"].items(), key=lambda x: x[1], reverse=True)[:5]
     
@@ -159,7 +153,6 @@ async def get_head_to_head_statistics(team_a, team_b, limit=10):
                          if (team_a.lower() in m.get("name", "").lower() and team_b.lower() in m.get("name", "").lower()) and m.get("matchEnded"):
                              matches_found.append(m)
                              
-    # Dedup
     unique = {m["id"]: m for m in matches_found}.values()
     final = sorted(unique, key=lambda x: x.get("date", ""), reverse=True)[:limit]
     

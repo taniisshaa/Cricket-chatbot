@@ -1,7 +1,10 @@
 streamlit
+pandas
+httpx
 python-dotenv
 openai
-httpx
-dateparser
+google-generativeai
 reportlab
-numpy
+sqlitedict
+asyncio
+pyyaml

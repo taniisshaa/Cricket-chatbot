@@ -7,7 +7,6 @@ import sys
 import os
 from datetime import datetime
 
-# Ensure app is in path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from dotenv import load_dotenv
@@ -29,8 +28,6 @@ class SyncHandler(http.server.SimpleHTTPRequestHandler):
             
             logger.info("Received Sync Request")
             try:
-                # Run the async sync function
-                # We need to create a new event loop for this synchronous handler if not present
                 result = asyncio.run(sync_recent_finished_matches(days_back=2))
                 
                 response = json.dumps(result, indent=2).encode('utf-8')
@@ -45,7 +42,6 @@ class SyncHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(b'Not Found. Use /sync-finished')
 
 def run_server():
-    # Allow reuse address to avoid "Address already in use" errors during restarts
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("", PORT), SyncHandler) as httpd:
         print(f"Serving API at http://localhost:{PORT}")

@@ -34,12 +34,9 @@ async def get_upcoming_matches(days=14, check_date=None):
         for m in raw:
             norm = _normalize_sportmonks_to_app_format(m)
 
-            # If looking for a specific date, include ALL matches (even finished ones).
-            # Otherwise (general upcoming), filter out finished matches.
             if check_date or norm.get("status") not in ["Finished", "Completed", "Abandoned"]:
                  matches.append(norm)
 
-    # Fallback: If specific date requested but no matches found, check +/- 2 days
     if not matches and check_date:
         logger.info(f"No matches found on {check_date}, expanding search +/- 2 days...")
         try:
@@ -57,7 +54,6 @@ async def get_upcoming_matches(days=14, check_date=None):
                 raw_exp = res_exp.get("data", [])
                 for m in raw_exp:
                     norm = _normalize_sportmonks_to_app_format(m)
-                    # For fallback, we return what we find to be helpful
                     norm["note"] = f"(Originally searched {check_date})"
                     matches.append(norm)
         except Exception as e:

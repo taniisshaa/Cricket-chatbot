@@ -464,7 +464,6 @@ You are integrated with an IPL/WPL archive. Use this knowledge to interpret prov
 async def analyze_intent(user_query, history=None):
     logger.info(f"ROUTER INPUT > Query: {user_query}")
     client = get_ai_client()
-    # 🧠 NEW: Inject Schema-Aware Instructions
     SCHEMA_INSTRUCT = f"""
     [TASK UPDATE]
     You must now also output a 'structured_schema' object in your JSON response for complex/past queries.
@@ -517,10 +516,8 @@ async def analyze_intent(user_query, history=None):
         intent_upper = result.get("intent", "GENERAL").upper()
         time_ctx = result.get("time_context", "PRESENT").upper()
 
-        # --- BACKWARD COMPATIBILITY: POPULATE ENTITIES FROM SCHEMA ---
         struct = result.get("structured_schema")
         if struct:
-             # If exact entities are missing but schema has them, fill them
              ents = result.get("entities", {})
              if not ents.get("series") and struct.get("tournament"): ents["series"] = struct["tournament"]
              if not ents.get("year") and struct.get("season"): ents["year"] = struct["season"]
@@ -536,13 +533,10 @@ async def analyze_intent(user_query, history=None):
             tools.append("get_live_matches")
 
         elif intent_upper == "PAST_HISTORY":
-            # For schema-aware queries, we use the new SMART QUERY tool logic
             tools.append("execute_smart_query") # New Tool Flag
-            # Keep fallbacks
             tools.append("get_series_info")
             tools.append("search_historical_matches")
             
-            # Check for recent past manually
             entities = result.get("entities", {})
             target_date_str = entities.get("target_date")
             is_recent = False
@@ -616,7 +610,6 @@ You are **Agent 1: The Research & Analysis Unit**. 🕵️‍♂️
 
 [OUTPUT FORMAT - STRICT MARKDOWN]
 **Language**: English.
-## 🕵️‍♂️ Research Brief
 **Core Answer**: [Direct Prediction: Team X will win]
 **Key Stats**:
 - [Stat 1: e.g. H2H Record]
@@ -673,7 +666,6 @@ async def run_research_agent(context_data, user_query):
 async def generate_human_response(api_results, user_query, analysis, conversation_history=None):
     client = get_ai_client()
     
-    # --- STEP 1: RAG RETRIEVAL (Data Extraction) ---
     data_summary = []
     priorities = ["smart_query_result", "live_matches", "upcoming_schedule", "generic_today_data", "live_win_prediction", "prediction_analysis", "prediction_report", "specialist_analytics", "match_live_state", "final_match_scorecard", "final_match_info", "historical_match_focus", "historical_db_series_summary", "historical_team_season_summary", "series_analytics", "found_score_match", "specific_player_stats", "match_details", "scorecard", "date_scorecards", "player_perf", "player_past_performance", "head_to_head_history", "series_winner_info", "standings"]
     
@@ -692,7 +684,6 @@ async def generate_human_response(api_results, user_query, analysis, conversatio
         v = api_results[k]
         if not v: continue
         
-        # Smart Truncation
         if isinstance(v, list) and len(v) > 10: v = v[:10]
             
         try:
@@ -714,11 +705,9 @@ async def generate_human_response(api_results, user_query, analysis, conversatio
     if len(raw_context_str) > 25000:
         raw_context_str = raw_context_str[:25000] + "\n...[SYSTEM TRUNCATED]"
 
-    # --- STEP 2: AGENT 1 (RESEARCH & ANALYSIS) ---
     final_context = raw_context_str
     intent = analysis.get("intent", "").upper()
     
-    # We use Agent 1 for anything that requires "Thinking" (Predictions, Analysis, Why questions)
     should_use_researcher = (
         intent in ["PREDICTION", "DEEP_ANALYSIS", "SERIES_ANALYTICS", "SQUAD_COMPARISON"] 
         or "why" in user_query.lower()
@@ -738,11 +727,9 @@ async def generate_human_response(api_results, user_query, analysis, conversatio
             {raw_context_str[:5000]}
             """
     
-    # --- STEP 3: AGENT 2 (FRAMING & FORMATTING) ---
     intent_norm = str(analysis.get("intent", "general")).upper()
     time_norm = str(analysis.get("time_context", "PRESENT")).upper()
 
-    # Select Base Persona for Agent 2
     selected_prompt = PRESENTER_SYSTEM_PROMPT
     if intent_norm == "PAST_HISTORY" or time_norm == "PAST":
         selected_prompt = HISTORY_SYSTEM_PROMPT # Special persona for history
@@ -782,9 +769,6 @@ async def generate_human_response(api_results, user_query, analysis, conversatio
 async def search_web(query):
     return "Web search restricted."
 
-# ==============================================================================
-# 🧠 NEW GENERATION: ReAct Agent (Inspired by Dify.AI)
-# ==============================================================================
 
 REACT_SYSTEM_PROMPT = """
 You are the **Antigravity Cricket Super-Agent**. 🏏
@@ -854,10 +838,8 @@ class ReActAgent:
         self.log = []
 
     async def run(self):
-        # 1. Initialize
         messages = [{"role": "system", "content": REACT_SYSTEM_PROMPT.format(TODAY=TODAY, CURRENT_YEAR=CURRENT_YEAR)}]
         
-        # Add conversation history
         if self.history:
             messages.extend(self.history[-4:]) # Keep it short context
             
@@ -869,7 +851,6 @@ class ReActAgent:
             self.current_step += 1
             print(f"--- Step {self.current_step} ---")
 
-            # 2. Call LLM
             try:
                 response = await self.client.chat.completions.create(
                     model=get_model_name(),
@@ -880,11 +861,9 @@ class ReActAgent:
                 content = response.choices[0].message.content
                 messages.append({"role": "assistant", "content": content})
                 
-                # 3. Parse JSON
                 try:
                     step_data = json.loads(content)
                 except json.JSONDecodeError:
-                    # Fallback if LLM messes up JSON
                     if "final_answer" in content:
                         final_answer = content
                         break
@@ -903,10 +882,8 @@ class ReActAgent:
                     final_answer = fin_ans
                     break
 
-                # 4. Execute Tool
                 observation = await self._execute_tool(action, action_input)
                 
-                # 5. Append Observation
                 obs_str = f"[OBSERVATION]: {json.dumps(observation, default=str)}"
                 messages.append({"role": "user", "content": obs_str})
                 
@@ -926,7 +903,6 @@ class ReActAgent:
                 return await get_live_matches(**args)
             
             elif tool_name == "get_match_history":
-                # Wrapper for history search
                 return await search_historical_matches(
                     query=args.get("query"),
                     team=args.get("team_name"),
@@ -945,12 +921,10 @@ class ReActAgent:
             elif tool_name == "get_player_stats":
                 name = args.get("player_name")
                 from app.history_service import get_player_past_performance
-                # Use history service for detailed stats
                 res = await get_player_past_performance(name)
                 return res
 
             elif tool_name == "find_match_by_event":
-                # New tool for "Match where X happened"
                 from app.search_service import find_match_by_score
                 team = args.get("team")
                 score_desc = args.get("description") # e.g. "century", "100 runs"

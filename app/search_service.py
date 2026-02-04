@@ -17,7 +17,6 @@ def _is_team_match(query, target_name):
     t = _normalize(target_name)
     if q in t: return True
     
-    # Initials check (e.g. CSK vs Chennai Super Kings)
     words = re.split(r'[\s\.\-]+', target_name)
     initials = "".join([w[0] for w in words if w]).lower()
     if q == initials: return True
@@ -50,22 +49,18 @@ async def find_series_smart(series_name, year=None):
     clean_series = _normalize(series_name)
     year_str = str(year) if year else ""
     
-    # 1. Year based search
     if year_str:
         y_res = await getSeries(year_str, rows=50)
         if y_res.get("data"):
             candidates = [s for s in y_res["data"] if _match_series_name(clean_series, s.get("name"))]
             if candidates: return candidates[0]["id"]
 
-    # 2. Name based search
     res = await getSeries(clean_series, rows=20)
     candidates = res.get("data", [])
     if not candidates: return None
     
-    # Simple scoring
     best = candidates[0]
     if year_str:
-        # Resolve specific season if year provided
         season_id = await resolve_season_for_league(best["id"], year_str)
         if season_id: return season_id
         
@@ -79,16 +74,13 @@ async def find_match_id(team1=None, team2=None, series_id=None, target_date=None
     
     pool = []
     
-    # 1. Live/Recent
     l_res = await getCurrentMatches()
     pool.extend(l_res.get("data", []))
     
-    # 2. Upcoming if needed
     if not pool:
         u_res = await get_upcoming_matches()
         pool.extend(u_res.get("data", []))
 
-    # 3. Series Search
     if series_id:
         s_res = await get_series_matches_by_id(series_id)
         pool.extend(s_res.get("data", []))
@@ -98,7 +90,6 @@ async def find_match_id(team1=None, team2=None, series_id=None, target_date=None
             s_res = await get_series_matches_by_id(s_id)
             pool.extend(s_res.get("data", []))
             
-    # 4. Filter
     matches = []
     for m in pool:
         name = _normalize(m.get("name", ""))
@@ -115,14 +106,11 @@ async def find_match_id(team1=None, team2=None, series_id=None, target_date=None
             
     if not matches: return None
     
-    # Prioritize: Live > Finished > scheduled
     matches.sort(key=lambda x: (x.get("status") == "Live", x.get("matchEnded")), reverse=True)
     return matches[0]["id"]
 
 async def find_match_by_score(team, score_str, year=None, series_name=None, score_details=None):
     """Find a match where a specific score happened."""
-    # Simplified logic to save space - full logic was huge
-    # Just relies on basic search + scorecard scan
     logger.info(f"Score Search: {team} {score_str}")
     s_id = await find_series_smart(series_name, year)
     if not s_id: return None
@@ -130,7 +118,6 @@ async def find_match_by_score(team, score_str, year=None, series_name=None, scor
     res = await get_series_matches_by_id(s_id)
     matches = res.get("data", [])
     
-    # Check each match scorecard
     for m in matches:
         if not m.get("matchEnded"): continue
         sc = await getMatchScorecard(m["id"])
