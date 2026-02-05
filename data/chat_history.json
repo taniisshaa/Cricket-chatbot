@@ -1,110 +1,42 @@
 [
   {
     "role": "user",
-    "content": "Give live matches?"
+    "content": "What was the opening partnership score in the 2025 T20 Blast Women's 2025 final?"
   },
   {
     "role": "assistant",
-    "content": "Currently, the live match between Sri Lanka and England is ongoing at Pallekele International Cricket Stadium. England, batting first, is at 101/6 in 16.5 overs. Sam Curran is currently batting with 42 runs off 40 balls, while Liam Dawson is on the crease with 14 runs off 18 balls. Dasun Shanaka has bowled 2.5 overs without picking up a wicket and given away 17 runs."
+    "content": "The opening partnership score in the 2025 T20 Blast Women's final is not available currently. The system doesn't have this specific data synced yet. If there are any other details or specific matches you're curious about, feel free to ask!"
   },
   {
     "role": "user",
-    "content": "Give the winning probability od this match?"
+    "content": "give the results of  T20 Blast Women's 2025 final?"
   },
   {
     "role": "assistant",
-    "content": "As the match between Sri Lanka and England is underway with England at 111/7 in 17.5 overs, Sri Lanka has a higher winning probability. Considering England's current batting struggles and Sri Lanka's efficient bowling, Sri Lanka is in a stronger position. Sam Curran's performance will be crucial for England to set a competitive total, but Sri Lanka has the edge based on the current context."
+    "content": "The 2025 Women's T20 Blast final was between Surrey W and Warwickshire W. However, the match result is not available in the current data. If you need information on other aspects, feel free to ask!"
   },
   {
     "role": "user",
-    "content": "abhi konsi team batting kar rahi  hai?"
+    "content": "give the results of T20 Blast Women's 2025 final?"
   },
   {
     "role": "assistant",
-    "content": "अभी श्रीलंका टीम बल्लेबाज़ी कर रही है। उनका स्कोर 6/1 है और उन्हें 129 रनों का लक्ष्य मिला है।"
+    "content": "The result of the T20 Blast Women's 2025 final between Surrey W and Warwickshire W is not available in the current data. If you have other inquiries, feel free to ask!"
   },
   {
     "role": "user",
-    "content": "shrilanka ki team mai batting kon kar raha hai??"
+    "content": "recent mai shrilanka and england ka match tha usme kon jeeta??"
   },
   {
     "role": "assistant",
-    "content": "श्रीलंका की टीम में इस समय पाथुम निसंका और कुसल मेंडिस बल्लेबाज़ी कर रहे हैं। पाथुम निसंका ने 6 गेंदों पर 3 रन बनाए हैं और कुसल मेंडिस 6 गेंदों पर 4 रन बनाकर खेल रहे हैं। टीम का स्कोर 7/1 है।"
+    "content": "हाल ही में श्रीलंका और इंग्लैंड के बीच मैच हुआ था, जिसमें इंग्लैंड ने 12 रनों से जीत हासिल की। यह मैच 3 फरवरी 2026 को खेला गया था।"
   },
   {
     "role": "user",
-    "content": "Abhi bowling kaun kar raha hai?"
+    "content": "yesterday koi match tha??"
   },
   {
     "role": "assistant",
-    "content": "अभी इंग्लैंड के लिए क्रिस जॉर्डन गेंदबाज़ी कर रहे हैं। उन्होंने 2 ओवर में 13 रन देकर 1 विकेट लिया है।"
-  },
-  {
-    "role": "user",
-    "content": "Last over me kya hua?"
-  },
-  {
-    "role": "assistant",
-    "content": "अंतिम ओवर में 0, 1, 6, 1, और 6 रन बने। पाथुम निसंका और कुसल मेंडिस ने श्रीलंका के लिए क्रमशः 15 और 6 रन बनाये हैं। श्रीलंका का स्कोर अब 21/1 है।"
-  },
-  {
-    "role": "user",
-    "content": "Powerplay me England ka performance kaisa raha?"
-  },
-  {
-    "role": "assistant",
-    "content": "पावरप्ले के दौरान इंग्लैंड ने 6 ओवर में 3 विकेट खोकर 47 रन बनाए। शुरुआत में इंग्लैंड को बैटिंग में संघर्ष करना पड़ा, जिसकी वजह से तीन महत्वपूर्ण विकेट जल्दी गिर गए थे।  बल्लेबाजों का आक्रमण श्रीलंकाई गेंदबाजों द्वारा कुशलतापूर्वक रोका गया। 🏏"
-  },
-  {
-    "role": "user",
-    "content": "Abhi match kis side ja raha hai?"
-  },
-  {
-    "role": "assistant",
-    "content": "अभी मैच में श्रीलंका का पलड़ा भारी है। उन्हें जीत के लिए केवल 107 रन और चाहिए, जबकि उनके पास 16.4 ओवर बाकी हैं। इंग्लैंड ने पहले खेलते हुए 128/9 का स्कोर बनाया है। श्रीलंका की तरफ से पाथुम निसंका 15 रन पर खेल रहे हैं। श्रीलंका अच्छी स्थिति में है और लक्ष्य को हासिल करने की ओर बढ़ रही है। 🏏"
-  },
-  {
-    "role": "user",
-    "content": "Is situation me kaunsa team favourite hai?"
-  },
-  {
-    "role": "assistant",
-    "content": "इस समय मैच में श्रीलंका का पलड़ा भारी है। इंग्लैंड ने 128/9 का स्कोर बनाया है और श्रीलंका 3.2 ओवर में 1 विकेट खोकर 21 रन बना चुका है। उन्हें जीत के लिए केवल 107 रन और चाहिए, और उनके पास 16.4 ओवर बाकी हैं। इस स्थिति में श्रीलंका मजबूत स्थिति में नजर आ रहा है। 🏏"
-  },
-  {
-    "role": "user",
-    "content": "Low-score match hai ya high-scoring?"
-  },
-  {
-    "role": "assistant",
-    "content": "ये एक लो-स्कोर मैच है। इंग्लैंड ने पहले बल्लेबाजी करते हुए 20 ओवर में 128/9 का स्कोर बनाया। अभी श्रीलंका ने 3.2 ओवर में 1 विकेट खोकर 21 रन बना लिए हैं और लक्ष्य 129 रन है। 🏏"
-  },
-  {
-    "role": "user",
-    "content": "Agar live score update na ho to match kaise analyze karoge?"
-  },
-  {
-    "role": "assistant",
-    "content": "Live data is required for a current match analysis."
-  },
-  {
-    "role": "user",
-    "content": "give ashes series of past"
-  },
-  {
-    "role": "assistant",
-    "content": "The recent Ashes Series ended with Australia claiming victory over England. Out of the 5 matches played, Australia showed a dominant performance, winning 4 matches while losing only 1. In the final match at the Sydney Cricket Ground on January 3, 2026, Australia triumphed over England, even after England won the toss and chose to bat first. This victory further solidified Australia's strength in one of cricket's most storied rivalries. 🏆"
-  },
-  {
-    "role": "user",
-    "content": "give live matches?"
-  },
-  {
-    "role": "user",
-    "content": "give live matches?\n\n"
-  },
-  {
-    "role": "assistant",
-    "content": "It looks like there are no live matches happening at the moment. Keep checking back for updates or upcoming matches soon! 😊"
+    "content": "कल कोई मैच नहीं हुआ था, यानी 4 फरवरी 2026 को कोई समाप्त मैच नहीं था।"
   }
 ]

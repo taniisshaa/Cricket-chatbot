@@ -2,30 +2,24 @@ import logging
 import os
 import json
 import tempfile
-from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv(override=True)
 def get_logger(name="app", log_file=None):
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
-
     if not logger.handlers:
         formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-
         c_handler = logging.StreamHandler()
         c_handler.setFormatter(formatter)
         logger.addHandler(c_handler)
-
         if log_file:
             log_dir = "logs"
             if not os.path.exists(log_dir):
                 os.makedirs(log_dir)
-            
             file_path = os.path.join(log_dir, log_file)
             f_handler = logging.FileHandler(file_path, encoding='utf-8')
             f_handler.setFormatter(formatter)
             logger.addHandler(f_handler)
-
     logger.propagate = False
     return logger
 logger = get_logger("app_main")

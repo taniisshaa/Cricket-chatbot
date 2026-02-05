@@ -4,19 +4,15 @@ import httpx
 import asyncio
 import hashlib
 from datetime import datetime
-from app.utils_core import get_logger
-
+from src.utils.utils_core import get_logger
 logger = get_logger("backend_core", "general_app.log")
-
 _CACHE = {}
 SPORTMONKS_BASE = "https://cricket.sportmonks.com/api/v2.0"
 _CLIENT = None
 _LOOP_REF = None
-
 def _get_cache_key(endpoint, params):
     param_str = json.dumps(params or {}, sort_keys=True, default=str)
     return hashlib.md5(f"{endpoint}:{param_str}".encode()).hexdigest()
-
 def _get_from_cache(cache_key, ttl=300):
     if cache_key in _CACHE:
         cached_data, timestamp = _CACHE[cache_key]
@@ -24,10 +20,8 @@ def _get_from_cache(cache_key, ttl=300):
             return cached_data
         del _CACHE[cache_key]
     return None
-
 def _save_to_cache(cache_key, data):
     _CACHE[cache_key] = (data, datetime.now())
-
 async def _get_client():
     global _CLIENT, _LOOP_REF
     try:
@@ -38,32 +32,25 @@ async def _get_client():
         _CLIENT = httpx.AsyncClient(timeout=30.0, limits=httpx.Limits(max_connections=20))
         _LOOP_REF = current_loop
     return _CLIENT
-
 async def sportmonks_cric(endpoint, params=None, use_cache=True, ttl=60, **kwargs):
     params = params or {}
     sm_key = os.getenv("SPORTMONKS_API_KEY")
     if not sm_key: return {"ok": False, "error": "API Key Missing"}
-    
     if kwargs.get("force_api"):
         use_cache = False
-    
     cache_key = _get_cache_key(f"sm:{endpoint}", params)
     if use_cache:
         cached = _get_from_cache(cache_key, ttl)
         if cached: return cached
-        
     params["api_token"] = sm_key
     client = await _get_client()
-    
     timeout = httpx.Timeout(45.0, connect=10.0)
-    
     try:
         r = await client.get(f"{SPORTMONKS_BASE}{endpoint}", params=params, timeout=timeout)
         if r.status_code == 200:
             result = {"ok": True, "status": 200, "data": r.json().get("data", [])}
             if use_cache: _save_to_cache(cache_key, result)
             return result
-        
         if r.status_code >= 500 and "include" in params:
              logger.warning(f"Complex API call failed ({r.status_code}), retrying with simplified query...")
              simple_params = params.copy()
@@ -71,7 +58,6 @@ async def sportmonks_cric(endpoint, params=None, use_cache=True, ttl=60, **kwarg
              r2 = await client.get(f"{SPORTMONKS_BASE}{endpoint}", params=simple_params, timeout=timeout)
              if r2.status_code == 200:
                   return {"ok": True, "status": 200, "data": r2.json().get("data", []), "warning": "Simplified data"}
-
         return {"ok": False, "status": r.status_code, "error": r.text[:200]}
     except (httpx.TimeoutException, httpx.NetworkError) as e:
         logger.error(f"API Connection Error on {endpoint}: {e}")
@@ -86,65 +72,49 @@ async def sportmonks_cric(endpoint, params=None, use_cache=True, ttl=60, **kwarg
         return {"ok": False, "status": 0, "error": str(e)}
     except Exception as e:
         return {"ok": False, "status": 0, "error": str(e)}
-
 async def getSeries(search=None, **kwargs):
     params = {"search": search} if search else {}
     return await sportmonks_cric("/leagues", params, **kwargs)
-
 async def getSeriesInfo(series_id, includes=None, **kwargs):
     info = await sportmonks_cric(f"/seasons/{series_id}", {}, **kwargs)
     if not info.get("data"): info = await sportmonks_cric(f"/leagues/{series_id}", {}, **kwargs)
-    
     params = {"include": f"localteam,visitorteam,venue,{includes}" if includes else "localteam,visitorteam,venue"}
     sid = info.get("data", {}).get("season_id") or info.get("data", {}).get("current_season_id")
     if sid: params["filter[season_id]"] = sid
     else: params["filter[season_id]"] = series_id # Fallback
-    
     fixtures = await sportmonks_cric("/fixtures", params, **kwargs)
     return {
-        "ok": True, 
+        "ok": True,
         "data": {"info": info.get("data"), "matchList": [m for m in fixtures.get("data", [])]}
     }
-
 async def getMatchScorecard(match_id, **kwargs):
     return await sportmonks_cric(f"/fixtures/{match_id}", {"include": "localteam,visitorteam,runs,batting.batsman,bowling.bowler,venue,balls,scoreboards,manofmatch"}, **kwargs)
-
 async def getMatchInfo(match_id, **kwargs):
     return await sportmonks_cric(f"/fixtures/{match_id}", {"include": "localteam,visitorteam,venue,manofmatch"}, **kwargs)
-
 async def getMatchSquad(match_id, **kwargs):
     return await sportmonks_cric(f"/fixtures/{match_id}", {"include": "lineup"}, **kwargs)
-
 async def getMatchCommentary(match_id, **kwargs):
     return await sportmonks_cric(f"/fixtures/{match_id}", {"include": "balls"}, **kwargs)
-
 async def getMatchPoints(match_id, **kwargs):
     return {"ok": False, "error": "Not implemented"}
-
 async def getPlayers(search=None, **kwargs):
     params = {"filter[lastname]": search} if search else {}
     return await sportmonks_cric("/players", params, **kwargs)
-
 async def getStandings(series_id, **kwargs):
     return await sportmonks_cric(f"/standings/season/{series_id}", {}, **kwargs)
-
 async def get_upcoming_matches(**kwargs):
-    from app.upcoming_service import get_upcoming_matches as svc_upcoming
+    from src.environment.upcoming_service import get_upcoming_matches as svc_upcoming
     return await svc_upcoming(**kwargs)
-
 async def getCurrentMatches(**kwargs):
-    from app.live_match_service import fetch_realtime_matches
-    from app.current_season_service import get_todays_matches_full, get_matches_by_date
-    
+    from src.environment.live_match_service import fetch_realtime_matches
+    from src.core.current_season_service import get_todays_matches_full, get_matches_by_date
     date_query = kwargs.get("date")
     team_query = kwargs.get("team") or kwargs.get("team_a")
     if date_query:
         logger.info(f"Fetching matches for specific date: {date_query} (Team: {team_query})")
         return await get_matches_by_date(date_query, team_name=team_query)
-
     live = await fetch_realtime_matches()
     today = await get_todays_matches_full()
-    
     combined = live + today.get("data", [])
     seen = set()
     unique = []
@@ -153,16 +123,13 @@ async def getCurrentMatches(**kwargs):
             unique.append(m)
             seen.add(m["id"])
     return {"ok": True, "data": unique}
-
 async def getTodayMatches(**kwargs):
-    from app.current_season_service import get_todays_matches_full
+    from src.core.current_season_service import get_todays_matches_full
     return await get_todays_matches_full()
-
 async def get_live_matches(**kwargs): return await getCurrentMatches(**kwargs)
 async def get_series_matches_by_id(series_id, **kwargs):
     res = await getSeriesInfo(series_id, **kwargs)
     return {"data": res.get("data", {}).get("matchList", [])}
-
 def _normalize_sportmonks_to_app_format(sm_match):
     m_id = sm_match.get("id")
     local = sm_match.get("localteam", {}).get("name", "Local")
@@ -176,11 +143,9 @@ def _normalize_sportmonks_to_app_format(sm_match):
             "id": mom.get("id"),
             "team_id": mom.get("team_id")
         }
-
     best_players = []
     batting = sm_match.get("batting", [])
     bowling = sm_match.get("bowling", [])
-    
     if batting:
         sorted_bat = sorted(batting, key=lambda x: x.get("score") or x.get("runs") or 0, reverse=True)[:2]
         for b in sorted_bat:
@@ -189,7 +154,6 @@ def _normalize_sportmonks_to_app_format(sm_match):
              runs = b.get("score") or b.get("runs") or 0
              balls = b.get("ball") or b.get("balls") or 0
              best_players.append(f"{name} ({runs} off {balls})")
-
     if bowling:
         sorted_bowl = sorted(bowling, key=lambda x: x.get("wickets") or 0, reverse=True)[:2]
         for b in sorted_bowl:
@@ -200,7 +164,6 @@ def _normalize_sportmonks_to_app_format(sm_match):
                  runs_conceded = b.get("runs") or 0
                  overs = b.get("overs") or 0
                  best_players.append(f"{name} ({w}/{runs_conceded} in {overs})")
-
     return {
         "id": m_id,
         "name": f"{local} vs {visitor}",
@@ -216,35 +179,27 @@ def _normalize_sportmonks_to_app_format(sm_match):
         "top_performers": best_players,
         "scorecard": [{"inning": "All", "batting": batting, "bowling": bowling}] if (batting or bowling) else []
     }
-
 async def fetch_last_finished_match(team_name=None, opponent_name=None, match_type=None):
     """
     Fetches the most recent finished match, optionally filtering by team name and opponent.
     """
     logger.info(f"Fetching last finished match. Team: {team_name} | Opponent: {opponent_name}")
-    
     params = {
         "sort": "-starting_at",
         "include": "localteam,visitorteam,runs,venue,manofmatch,bowling.bowler,batting.batsman",
     }
-    
     res = await sportmonks_cric("/fixtures", params)
     if not res.get("ok"):
         return None
-        
     matches = res.get("data", [])
-    
     t_filter = (team_name or "").lower().strip()
     o_filter = (opponent_name or "").lower().strip()
-    
     for m in matches:
         status = str(m.get("status", "")).lower()
         if status not in ["finished", "completed"] and "won" not in status:
              continue
-             
         t1 = m.get("localteam", {}).get("name", "").lower()
         t2 = m.get("visitorteam", {}).get("name", "").lower()
-
         match_hit = False
         if not t_filter:
             match_hit = True
@@ -253,20 +208,16 @@ async def fetch_last_finished_match(team_name=None, opponent_name=None, match_ty
                 match_hit = True
             elif o_filter in t1 or o_filter in t2:
                 match_hit = True
-        
         if match_hit:
             return _normalize_sportmonks_to_app_format(m)
-        
     return None
-
 async def cricket_api(intent, **kwargs):
     logger.info(f"API Dispatch: {intent}")
     try:
-        from app.live_match_service import get_live_match_details, fetch_match_context_bundle, fetch_realtime_matches
-        from app.search_service import find_match_id, find_series_smart
-        from app.analytics_service import get_series_analytics, get_head_to_head_statistics
-        from app.upcoming_service import get_upcoming_matches as svc_upcoming
-        
+        from src.environment.live_match_service import get_live_match_details, fetch_match_context_bundle, fetch_realtime_matches
+        from src.core.search_service import find_match_id, find_series_smart
+        from src.core.analytics_service import get_series_analytics, get_head_to_head_statistics
+        from src.environment.upcoming_service import get_upcoming_matches as svc_upcoming
         if intent == "live_match":
             return await getCurrentMatches()
         elif intent in ["upcoming_match", "upcoming_matches"]:
@@ -289,7 +240,6 @@ async def cricket_api(intent, **kwargs):
     except Exception as e:
         logger.error(f"API Error: {e}")
         return {"error": str(e)}
-
 get_series_info = getSeriesInfo
 get_match_scorecard = getMatchScorecard
 get_series_standings = getStandings

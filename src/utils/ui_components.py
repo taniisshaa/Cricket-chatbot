@@ -1,8 +1,6 @@
-
 import streamlit as st
 from datetime import datetime
-from app.utils_core import save_chat, generate_chat_pdf
-
+from src.utils.utils_core import save_chat, generate_chat_pdf
 def setup_streamlit_ui():
     """
     Sets up the Streamlit UI, including CSS and Sidebar logic.
@@ -55,7 +53,6 @@ def setup_streamlit_ui():
         }
         </style>
     """, unsafe_allow_html=True)
-
     with st.sidebar:
         st.markdown('<div class="new-chat-btn">', unsafe_allow_html=True)
         if st.button("New Chat"):
@@ -66,7 +63,6 @@ def setup_streamlit_ui():
             save_chat([])
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
-
         st.write("---")
         if st.button("Clear History"):
             st.session_state.messages = []
@@ -76,7 +72,6 @@ def setup_streamlit_ui():
             save_chat([])
             st.success("History Cleared!")
             st.rerun()
-
         st.write("---")
         if st.session_state.get("messages"):
             try:
