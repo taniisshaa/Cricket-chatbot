@@ -28,13 +28,12 @@ def _process_raw_json_results(rows):
                 except:
                     continue
             
-            # Extract only the most critical technical fields for the LLM
             row["batting_summary"] = []
             for b in raw.get("batting", []):
                 name = b.get("batsman", {}).get("fullname") or "Unknown"
                 row["batting_summary"].append({
                     "p": name,
-                    "r": b.get("score"), "b": b.get("balls"), "sr": b.get("rate")
+                    "r": b.get("score"), "b": b.get("ball"), "sr": b.get("rate")
                 })
             
             row["bowling_summary"] = []
@@ -70,39 +69,54 @@ Your mission is to generate **100% accurate, high-performance PostgreSQL queries
 - **teams**: `id` (int), `name` (text, e.g. 'Mumbai Indians').
 - **season_champions**: `season_id` (int), `winner_team_id` (int), `final_match_id` (int).
 
-### 🛠️ CORE SQL PATTERNS
-1. **Tournament Winner (Agent Priority #1)**:
+### 🏆 TOURNAMENT AWARDS & LEADERBOARDS
+1. **Orange Cap (Most Runs)**:
    ```sql
-   -- Use this for "Who won [Tournament] [Year]?"
-   SELECT t.name as winner, s.name as season_name
-   FROM season_champions sc
-   JOIN seasons s ON sc.season_id = s.id
-   JOIN teams t ON sc.winner_team_id = t.id
-   WHERE (s.name ILIKE '%Indian Premier League%' OR s.name ILIKE '%IPL%') 
-   AND s.year = '2025';
-   ```
-
-2. **Match Result**:
-   ```sql
-   SELECT f.name, f.status, f.starting_at, t.name as winner
-   FROM fixtures f
-   LEFT JOIN teams t ON f.winner_team_id = t.id
-   WHERE f.name ILIKE '%India%' AND f.starting_at::date = '2026-02-07';
-   ```
-
-3. **Player Statistics (from JSONB)**:
-   ```sql
-   SELECT bat->'batsman'->>'fullname' AS player, (bat->>'score')::int AS runs
+   -- Tie-breakers: 1. Higher SR (runs*100/ball), 2. Fewer balls faced
+   SELECT bat->'batsman'->>'fullname' AS player, 
+          SUM((bat->>'score')::int) AS total_runs,
+          (SUM((bat->>'score')::float) * 100.0 / NULLIF(SUM((bat->>'ball')::float), 0)) AS strike_rate
    FROM fixtures f, jsonb_array_elements(f.raw_json->'batting') bat
-   WHERE f.name ILIKE '%RCB%' AND (f.raw_json->>'note') ILIKE '%Final%';
+   JOIN seasons s ON f.season_id = s.id
+   WHERE (s.name ILIKE '%Indian Premier League%' OR s.name ILIKE '%IPL%') AND s.year = '2025'
+   GROUP BY 1 ORDER BY total_runs DESC, strike_rate DESC LIMIT 1;
+   ```
+
+2. **Purple Cap (Most Wickets)**:
+   ```sql
+   -- Tie-breakers: 1. Better Economy (runs/overs), 2. Fewer runs conceded
+   SELECT bowl->'bowler'->>'fullname' AS player, 
+          SUM((bowl->>'wickets')::int) AS total_wickets,
+          (SUM((bowl->>'runs')::float) / NULLIF(SUM((bowl->>'overs')::float), 0)) AS economy
+   FROM fixtures f, jsonb_array_elements(f.raw_json->'bowling') bowl
+   JOIN seasons s ON f.season_id = s.id
+   WHERE (s.name ILIKE '%Indian Premier League%' OR s.name ILIKE '%IPL%') AND s.year = '2025'
+   GROUP BY 1 ORDER BY total_wickets DESC, economy ASC LIMIT 1;
+   ```
+
+3. **MVP (Most Valuable Player)**:
+   ```sql
+   -- Formula: 1 Run=1pt, 1 Wicket=25pts, 1 Six=3pts bonus, 1 Catch=10pts, 1 Stumping=15pts.
+   SELECT player_name, SUM(points) as mvp_points
+   FROM (
+     SELECT bat->'batsman'->>'fullname' as player_name, 
+            SUM((bat->>'score')::int * 1 + COALESCE((bat->>'six_x')::int, 0) * 3) as points
+     FROM fixtures f, jsonb_array_elements(f.raw_json->'batting') bat
+     JOIN seasons s ON f.season_id = s.id
+     WHERE s.name ILIKE '%IPL%' AND s.year = '2025' GROUP BY 1
+     UNION ALL
+     SELECT bowl->'bowler'->>'fullname', SUM((bowl->>'wickets')::int * 25)
+     FROM fixtures f, jsonb_array_elements(f.raw_json->'bowling') bowl
+     JOIN seasons s ON f.season_id = s.id
+     WHERE s.name ILIKE '%IPL%' AND s.year = '2025' GROUP BY 1
+   ) stats GROUP BY 1 ORDER BY 2 DESC LIMIT 1;
    ```
 
 ### ⚠️ CRITICAL RULES:
 - **IPL Mapping**: Database uses "Indian Premier League". If user says "IPL", use `s.name ILIKE '%Indian Premier League%'`.
 - **Table Names**: ONLY use `fixtures`, `seasons`, `teams`, `season_champions`. NO `series` table.
 - **Year Filter**: `seasons.year` is TEXT. Use `s.year = '2025'`.
-- **Joins**: Use `winner_team_id` to join with `teams.id`.
-- **Ambiguity**: If searching for a team in `fixtures`, use `f.name ILIKE '%[TeamName]%'`.
+- **JSONB Keys**: Batting uses `score` (runs), `ball` (balls), `six_x` (sixes). Bowling uses `wickets`, `runs`, `overs`.
 - **Output**: ONLY the SQL query. No markdown. No comments.
 """
 
