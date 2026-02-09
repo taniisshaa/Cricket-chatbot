@@ -60,7 +60,7 @@ def setup_streamlit_ui():
             st.session_state.chat_context = {
                 "last_series": None, "last_year": None, "last_team": None, "last_player": None
             }
-            save_chat([])
+            save_chat([], st.session_state.get("session_id"))
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
         st.write("---")
@@ -69,7 +69,7 @@ def setup_streamlit_ui():
             st.session_state.chat_context = {
                 "last_series": None, "last_year": None, "last_team": None, "last_player": None
             }
-            save_chat([])
+            save_chat([], st.session_state.get("session_id"))
             st.success("History Cleared!")
             st.rerun()
         st.write("---")

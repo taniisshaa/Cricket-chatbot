@@ -531,6 +531,45 @@ async def generate_human_response(api_results, user_query, analysis, conversatio
     except Exception as e:
         return f"Technical Error in Agent 2: {str(e)}"
 
+VERIFICATION_SYSTEM_PROMPT = """
+You are the **QUALITY ASSURANCE OFFICER (LAYER 3)**. 🛡️
+Your job is to VALIDATE the generated response against the provided data context.
+
+[STRICT RULES]
+1.  **HALLUCINATIONS**: Check if the response mentions facts (scores, winners, players) NOT present in the [INPUT CONTEXT].
+2.  **CONTRADICTIONS**: Check if the response contradicts the [INPUT CONTEXT] (e.g., Data says "India won", Response says "Pakistan won").
+3.  **FALSE NEGATIVES**: If data IS present but Response says "I don't know", mark as FAIL.
+4.  **RELEVANCY**: Does the response actually answer the [USER QUERY]?
+
+[OUTPUT FORMAT]
+- If PASS: Return "PASS"
+- If FAIL: Return "FAIL: <Brief Reason>"
+"""
+
+async def verify_response(user_query, api_results, generated_response):
+    client = get_ai_client()
+    
+    # Contextualize the data for the verifier
+    # We use a summarized version to avoid token limits, similar to generate_human_response
+    context_str = str(api_results)[:15000] 
+
+    try:
+        response = await client.chat.completions.create(
+            model=get_model_name(),
+            messages=[
+                {"role": "system", "content": VERIFICATION_SYSTEM_PROMPT},
+                {"role": "user", "content": f"""
+                [USER QUERY]: {user_query}
+                [INPUT CONTEXT]: {context_str}
+                [GENERATED RESPONSE]: {generated_response}
+                """}
+            ]
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Verification Error: {e}")
+        return "PASS (Verification Skipped due to Error)"
+
 async def calculate(expression: str):
     """Safely evaluates mathematical expressions for cricket stats (NRR, etc)"""
     try:

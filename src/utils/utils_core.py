@@ -32,8 +32,12 @@ class Config:
         for d in dirs:
             if not os.path.exists(d):
                 os.makedirs(d)
-def load_chat():
-    path = os.path.join("data", "chat_history.json")
+def load_chat(session_id=None):
+    if session_id:
+        path = os.path.join("data", "sessions", f"chat_{session_id}.json")
+    else:
+        path = os.path.join("data", "chat_history.json")
+        
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -42,9 +46,18 @@ def load_chat():
             logger.error(f"Failed to load chat: {e}")
             return []
     return []
-def save_chat(messages):
-    path = os.path.join("data", "chat_history.json")
-    Config.ensure_dirs()
+
+def save_chat(messages, session_id=None):
+    if session_id:
+        session_dir = os.path.join("data", "sessions")
+        if not os.path.exists(session_dir):
+            os.makedirs(session_dir)
+        path = os.path.join(session_dir, f"chat_{session_id}.json")
+    else:
+        # Fallback to global only if no session ID (not recommended for multi-user)
+        path = os.path.join("data", "chat_history.json")
+        Config.ensure_dirs()
+        
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(messages, f, ensure_ascii=False, indent=2)
