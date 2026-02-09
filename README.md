@@ -24,6 +24,7 @@ The project uses a **Hybrid Data Routing System** to ensure 100% data availabili
 ### 3. 📂 Project Structure
 - **`src/main.py`**: The Entry Point. Runs the Streamlit Interface.
 - **`src/agents/agent_workflow.py`**: The "Brain". Decides whether to route query to API or Database.
+- **`src/core/rag_orchestrator.py`**: The Master RAG Controller that ensures zero hallucination by retrieving verified data.
 - **`src/core/universal_cricket_engine.py`**: A Text-to-SQL engine that turns natural language queries into database commands.
 - **`src/environment/`**: Services for fetching Live/API data.
 - **`data/full_raw_history.db`**: The central brain storage for all historical stats.

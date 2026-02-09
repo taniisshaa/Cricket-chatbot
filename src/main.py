@@ -11,6 +11,22 @@ from src.agents.agent_workflow import process_user_message
 from src.utils.utils_core import save_chat, load_chat, Config, get_logger
 Config.ensure_dirs()
 logger = get_logger("app_main", "general_app.log")
+
+# --- BACKGROUND SYNC FOR AUTOMATIC DATA RETRIEVAL ---
+@st.cache_resource
+def start_auto_sync_on_launch():
+    """
+    AUTO-SYNC: Background thread to fetch finished matches automatically.
+    Using @st.cache_resource ensures this runs ONCE when the app starts.
+    """
+    try:
+        from src.utils.background_scheduler import start_background_sync
+        start_background_sync()
+    except Exception as e:
+        logger.error(f"Auto-Sync Start Failed: {e}")
+
+start_auto_sync_on_launch()
+# ----------------------------------------------------
 if "messages" not in st.session_state: st.session_state.messages = load_chat()
 if "processing" not in st.session_state: st.session_state.processing = False
 if "chat_context" not in st.session_state:

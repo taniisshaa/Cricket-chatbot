@@ -24,7 +24,8 @@ from src.core.analytics_service import (
 from src.environment.live_match_service import (
     get_live_match_details, fetch_match_context_bundle, calculate_match_odds
 )
-from src.core.universal_cricket_engine import handle_universal_cricket_query
+
+from src.core.rag_orchestrator import execute_rag_pipeline
 def update_context(series=None, year=None, team=None, player=None, opponent=None):
     if series: st.session_state.chat_context["last_series"] = series
     if year: st.session_state.chat_context["last_year"] = year
@@ -118,28 +119,52 @@ async def process_user_message(user_query, conversation_history=None):
         query_yr = int(str(year))
     except:
         query_yr = current_yr # Default to current if parse fails
-    DB_CUTOFF_YEAR = current_yr - 1
-    is_historical_year = (query_yr <= DB_CUTOFF_YEAR)
+    # --- DATA SOURCING LOGIC (Finished = DB, Live/Upcoming = API) ---
+    q_lower = user_query.lower()
     is_past_intent = (
-        (intent == "PAST_HISTORY") or
-        (intent in ["PLAYER_STATS", "SERIES_STATS", "DEEP_REASONING", "HEAD_TO_HEAD"] and time_context == "PAST")
+        (intent in ["PAST_HISTORY", "RECORDS", "DEEP_REASONING"]) or
+        (intent in ["PLAYER_STATS", "SERIES_STATS", "HEAD_TO_HEAD"] and time_context == "PAST") or
+        (time_context == "PAST") or
+        ("yesterday" in q_lower or "कल" in q_lower or "kal" in q_lower or "last night" in q_lower)
     )
+
     if is_past_intent:
-        ctx_logger.info(f"LOGIC: Intent is {intent} (Time: {time_context}) -> ROUTING TO UNIVERSAL ENGINE (DB).")
-        ctx_logger.info(f"🚀 Engaging Universal Cricket Engine (Semantic DB Query) - Year: {query_yr}")
-    if is_past_intent:
-        from src.core.universal_cricket_engine import handle_universal_cricket_query
-        universal_res = await handle_universal_cricket_query(user_query)
-        if universal_res and not universal_res.get("error"):
-            api_results["universal_query_result"] = universal_res
-            ctx_logger.info(f"✅ Universal Engine Success: {universal_res.get('interpretation', {}).get('query_type')}")
-            if universal_res.get("data") and len(universal_res["data"]) > 0:
-                 ctx_logger.info("Universal Engine provided data. Skipping legacy tools.")
-                 required_tools = []
-            else:
-                 ctx_logger.warning("Universal Engine returned 0 rows. Attempting legacy fallback...")
+        ctx_logger.info(f"LOGIC: Intent/Query indicates FINISHED/PAST match (Time: {time_context}) -> EXECUTING RAG PIPELINE.")
+        
+        # Execute RAG Pipeline
+        rag_result = await execute_rag_pipeline(user_query, analysis)
+        
+        if rag_result.get("status") == "success":
+            ctx_logger.info(f"✅ RAG Success: Retrieved {rag_result.get('data_type')} data ({rag_result.get('data_count')} records)")
+            
+            # Store the main context evidence for the LLM
+            api_results["rag_evidence"] = rag_result.get("context")
+            
+            # Use raw data to populate specific fields if needed
+            if rag_result.get("data_type") == "universal":
+                api_results["universal_query_result"] = {"data": rag_result.get("raw_data")}
+            elif rag_result.get("data_type") == "match":
+                # If specifically match data, populate historical_match_focus for deep dives
+                if rag_result.get("raw_data") and len(rag_result.get("raw_data")) > 0:
+                     api_results["historical_match_focus"] = {
+                         "match_info": rag_result.get("raw_data")[0],
+                         "rag_sourced": True
+                     }
+            
+            # If RAG found data, we can often skip legacy tools to avoid redundancy/errors
+            if rag_result.get("data_count", 0) > 0:
+                 ctx_logger.info("RAG provided sufficient data. Optimizing tool usage...")
+                 # Filter out some legacy tools if RAG covered them
+                 tools_to_remove = ["execute_smart_query", "search_historical_matches"]
+                 required_tools = [t for t in required_tools if t not in tools_to_remove]
+                 
         else:
-             ctx_logger.error(f"Universal Engine Error: {universal_res.get('error')}")
+             ctx_logger.error(f"❌ RAG Pipeline Failed: {rag_result.get('error')}")
+             ctx_logger.info("Falling back to legacy tools...")
+             # Fallback to Universal Engine directly if RAG failed (though RAG tries it internally)
+             # But if RAG error was catastrophic, we might try one last direct shot? 
+             # Actually RAG Orchestrator already does fallback. So we just rely on legacy tools in 'required_tools'.
+
     for tool in required_tools:
         try:
             logger.info(f"Executing Tool: {tool}...")
@@ -475,14 +500,39 @@ async def process_user_message(user_query, conversation_history=None):
         api_results["search_failed"] = True
         if s_name: api_results["missing_entity"] = f"Series: {s_name} ({year})"
         if p_name: api_results["missing_entity"] = f"Player: {p_name}"
+    
+    # Layer 3: Generate response and verify
     final_response = await generate_human_response(api_results, user_query, analysis, conversation_history)
+    
+    # LAYER 3: VERIFICATION (ChatGPT-Level Accuracy)
+    if api_results and intent not in ["GENERAL", "UPCOMING"]:
+        from src.agents.ai_core import verify_response
+        ctx_logger.info("🔍 LAYER 3: Verifying response accuracy...")
+        verification_result = await verify_response(user_query, api_results, final_response)
+        
+        if verification_result.startswith("FAIL"):
+            ctx_logger.warning(f"❌ Verification Failed: {verification_result}")
+            ctx_logger.info("🔄 Regenerating response with stricter prompt...")
+            
+            # Regenerate with explicit instruction to stick to data
+            final_response = await generate_human_response(
+                api_results, 
+                user_query, 
+                analysis, 
+                conversation_history,
+                strict_mode=True
+            )
+            ctx_logger.info("✅ Response regenerated with strict mode")
+        else:
+            ctx_logger.info(f"✅ Verification Passed: {verification_result}")
+    
     ctx_logger.info("--------------------------------------------------")
     ctx_logger.info("              SEARCH/REASONING SUMMARY")
     ctx_logger.info("--------------------------------------------------")
     ctx_logger.info(f"1. INTENT: {intent}")
     ctx_logger.info(f"2. YEAR CONTEXT: {year}")
     ctx_logger.info(f"3. TOOLS EXECUTED: {list(api_results.keys())}")
-    ctx_logger.info(f"4. DATA SOURCE: {'DATABASE (Universal Engine)' if is_past_intent and is_historical_year else 'LIVE API'}")
+    ctx_logger.info(f"4. DATA SOURCE: {'DATABASE (Universal Engine)' if is_past_intent else 'LIVE API'}")
     ctx_logger.info("--------------------------------------------------")
     ctx_logger.info("              FINAL AI RESPONSE")
     ctx_logger.info("--------------------------------------------------")

@@ -25,7 +25,7 @@ async def get_player_recent_performance(player_name, series_id=None):
                 [m for m in res["data"] if m.get("matchEnded")],
                 key=lambda x: x.get("date", "0000-00-00"),
                 reverse=True
-            )[:5] # Check last 5 matches
+            )[:5] 
     recent_stats = []
     for m in matches_to_scan:
         sc = await getMatchScorecard(m["id"])

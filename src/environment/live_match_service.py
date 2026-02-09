@@ -29,6 +29,7 @@ async def _get_client():
 async def sportmonks_live_request(endpoint, params=None):
     """
     Dedicated request function for live data with NO caching to ensure freshness.
+    Retries up to 3 times on failure.
     """
     params = params or {}
     sm_key = os.getenv("SPORTMONKS_API_KEY")
@@ -36,15 +37,27 @@ async def sportmonks_live_request(endpoint, params=None):
         return {"ok": False, "error": "API Key Missing"}
     params["api_token"] = sm_key
     client = await _get_client()
-    try:
-        r = await client.get(f"{SPORTMONKS_BASE}{endpoint}", params=params)
-        if r.status_code == 200:
-            result = r.json()
-            return {"ok": True, "status": 200, "data": result.get("data", [])}
-        else:
-             return {"ok": False, "status": r.status_code, "error": r.text[:200]}
-    except Exception as e:
-        return {"ok": False, "status": 0, "error": str(e)}
+    
+    max_retries = 3
+    last_error = "Unknown Error"
+    
+    for attempt in range(max_retries):
+        try:
+            r = await client.get(f"{SPORTMONKS_BASE}{endpoint}", params=params)
+            if r.status_code == 200:
+                result = r.json()
+                return {"ok": True, "status": 200, "data": result.get("data", [])}
+            else:
+                last_error = f"HTTP {r.status_code}: {r.text[:200]}"
+                logger.warning(f"Live Request Attempt {attempt+1} failed: {last_error}")
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"Live Request Attempt {attempt+1} exception: {last_error}")
+        
+        if attempt < max_retries - 1:
+            await asyncio.sleep(1) # Short backoff
+            
+    return {"ok": False, "status": 0, "error": last_error}
 def _normalize_status_live(status):
     s = str(status or "").lower()
     if "live" in s: return "LIVE"
@@ -75,7 +88,7 @@ def _normalize_live_match_data(sm_match):
         visitor = visitor_obj.get("name", "Team B")
         status_raw = sm_match.get("status", "")
         formatted_status = _normalize_status_live(status_raw)
-        note = sm_match.get("note", "")
+        note = sm_match.get("note") or ""
         if formatted_status == "Scheduled" and note:
              note_status = _normalize_status_live(note)
              if note_status in ["LIVE", "Innings Break", "Lunch", "Tea Break", "Dinner", "Drinks", "Delayed", "Stumps"]:
@@ -164,9 +177,57 @@ def _normalize_live_match_data(sm_match):
              detailed_str += " | Batting: " + ", ".join(batting_details)
         if bowling_details:
              detailed_str += " | Bowling: " + ", ".join(bowling_details)
+
+        # --- LIVE ANALYTICS (Projected, Milestones, Win Prob) ---
+        analytics_str = ""
+        try:
+             # 1. Projected Score
+             projection = ""
+             if current_score_obj and max_overs > 0 and cur_overs > 0:
+                 current_runs = float(current_score_obj.get("score", 0))
+                 crr = current_runs / cur_overs
+                 rem_overs_val = max_overs - cur_overs
+                 proj_score = int(current_runs + (crr * rem_overs_val))
+                 projection = f" | Projected: {proj_score}"
+                 
+             # 2. Win Probability Heuristic (Chase Scenario)
+             win_prob = ""
+             if len(scores_txt) >= 2 and max_overs > 0: # Implies 2nd innings active
+                 # Extract Target? Hard without full match details, assuming last score is chasing
+                 # Simplification: Use CRR vs RRR if available, else skip
+                 pass 
+
+             # 3. Milestone Watch (Active Batters)
+             milestones = []
+             for b in batters_list:
+                 if b.get("active"):
+                     s = b.get("score", 0)
+                     pname = _get_player_name(player_map, b.get("player_id"))
+                     if 40 <= s < 50: milestones.append(f"{pname} near 50 ({s})")
+                     elif 90 <= s < 100: milestones.append(f"{pname} near 100 ({s})")
+                     elif 190 <= s < 200: milestones.append(f"{pname} near 200 ({s})")
+             
+             if milestones:
+                 analytics_str += " | 🌟 Watch: " + ", ".join(milestones)
+             
+             if projection:
+                 analytics_str += projection
+                 
+             # 4. Last Over Analysis
+             if balls_data: 
+                 last_6 = balls_data[-6:] if len(balls_data) >= 6 else balls_data
+                 last_over_runs = sum([b.get("score", {}).get("runs", 0) if isinstance(b.get("score"), dict) else (b.get("score") or 0) for b in last_6])
+                 analytics_str += f" | Last 6 balls: {last_over_runs} runs"
+
+        except Exception as e:
+             logger.error(f"Analytics Calc Error: {e}")
+
+        detailed_str += analytics_str
         inn_break_msg = " [INNINGS BREAK - 1st Inning Over, 2nd Yet to Start]" if formatted_status == "Innings Break" else ""
         starting_time = sm_match.get("starting_at", "N/A")
         final_score_string = f"Match Date: {starting_time} | " + " | ".join(scores_txt) + detailed_str + recent_balls_str + (" | " + last_wicket_str if last_wicket_str else "") + overs_rem_str + inn_break_msg
+        
+        # Determine if actually finished
         is_actually_finished = (
             formatted_status == "Finished" or
             sm_match.get("winner_team_id") is not None or
@@ -174,6 +235,7 @@ def _normalize_live_match_data(sm_match):
             "match drawn" in note.lower() or
             "match tied" in note.lower()
         )
+
         is_live_final = (not is_actually_finished) and (formatted_status in ["LIVE", "Innings Break", "Lunch", "Tea Break", "Dinner", "Drinks", "Delayed", "Stumps"])
         return {
             "id": m_id,
@@ -190,6 +252,21 @@ def _normalize_live_match_data(sm_match):
     except Exception as e:
         logger.error(f"Live Normalization Error: {e}")
         return None
+async def archive_finished_fixtures(date_str):
+    """Internal helper to scan and archive finished matches for a date."""
+    try:
+        res = await sportmonks_live_request(f"/fixtures", {
+             "filter[starts_between]": f"{date_str},{date_str}",
+             "include": "localteam,visitorteam"
+        })
+        if res.get("ok"):
+            for m in res.get("data", []):
+                status = str(m.get("status", "")).lower()
+                if status in ["finished", "completed"]:
+                    await archive_match(m.get("id"))
+    except Exception as e:
+        logger.error(f"Auto-Archive Error: {e}")
+
 async def fetch_realtime_matches(filter_team=None):
     """
     Fetches strictly LIVE matches from /livescores endpoint.
@@ -209,10 +286,10 @@ async def fetch_realtime_matches(filter_team=None):
                  norm = _normalize_live_match_data(m)
                  if norm:
                      logger.info(f" -> Found: {norm.get('name')} | Status: {norm.get('status')} | Live: {norm.get('is_live')}")
-                     if filter_team:
-                         t_filter = filter_team.lower().strip()
-                         if t_filter in norm["name"].lower():
-                              live_matches.append(norm)
+                     if filter_team and isinstance(filter_team, str):
+                          t_filter = filter_team.lower().strip()
+                          if t_filter in norm["name"].lower():
+                               live_matches.append(norm)
                      else:
                          live_matches.append(norm)
                  else:
@@ -221,6 +298,10 @@ async def fetch_realtime_matches(filter_team=None):
                  logger.error(f"Error checking live match: {e}")
     else:
          logger.error(f"Livescores API Failed: {res_live.get('error')}")
+    # Proactively archive finished matches
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    asyncio.create_task(archive_finished_fixtures(today_str))
+
     if not live_matches:
         logger.info("No live matches found in livescores, checking today's fixtures fallback...")
         today_str = datetime.now().strftime("%Y-%m-%d")

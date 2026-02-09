@@ -1,42 +1,10 @@
 [
   {
     "role": "user",
-    "content": "What was the opening partnership score in the 2025 T20 Blast Women's 2025 final?"
+    "content": "ipl 2025 winner??"
   },
   {
     "role": "assistant",
-    "content": "The opening partnership score in the 2025 T20 Blast Women's final is not available currently. The system doesn't have this specific data synced yet. If there are any other details or specific matches you're curious about, feel free to ask!"
-  },
-  {
-    "role": "user",
-    "content": "give the results of  T20 Blast Women's 2025 final?"
-  },
-  {
-    "role": "assistant",
-    "content": "The 2025 Women's T20 Blast final was between Surrey W and Warwickshire W. However, the match result is not available in the current data. If you need information on other aspects, feel free to ask!"
-  },
-  {
-    "role": "user",
-    "content": "give the results of T20 Blast Women's 2025 final?"
-  },
-  {
-    "role": "assistant",
-    "content": "The result of the T20 Blast Women's 2025 final between Surrey W and Warwickshire W is not available in the current data. If you have other inquiries, feel free to ask!"
-  },
-  {
-    "role": "user",
-    "content": "recent mai shrilanka and england ka match tha usme kon jeeta??"
-  },
-  {
-    "role": "assistant",
-    "content": "हाल ही में श्रीलंका और इंग्लैंड के बीच मैच हुआ था, जिसमें इंग्लैंड ने 12 रनों से जीत हासिल की। यह मैच 3 फरवरी 2026 को खेला गया था।"
-  },
-  {
-    "role": "user",
-    "content": "yesterday koi match tha??"
-  },
-  {
-    "role": "assistant",
-    "content": "कल कोई मैच नहीं हुआ था, यानी 4 फरवरी 2026 को कोई समाप्त मैच नहीं था।"
+    "content": "Technical Error in Agent 2: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.', 'type': 'insufficient_quota', 'param': None, 'code': 'insufficient_quota'}}"
   }
 ]

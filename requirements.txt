@@ -8,3 +8,5 @@ reportlab
 sqlitedict
 asyncio
 pyyaml
+psycopg2-binary
+rapidfuzz

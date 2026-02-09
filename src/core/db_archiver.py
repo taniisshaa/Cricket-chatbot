@@ -50,26 +50,68 @@ def _save_to_db_sync(f):
     try:
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(fixtures)")
-        fixture_cols = {row['name'] for row in cursor.fetchall()}
-        match_id = f.get("id")
+        
+        # Helper to get columns for a table
+        def get_cols(table_name):
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            return {row['name'] for row in cursor.fetchall()}
+
+        # 1. Archive Teams
+        team_cols = get_cols("teams")
         for t_key in ["localteam", "visitorteam"]:
             t = f.get(t_key)
             if t:
-                cursor.execute("INSERT OR IGNORE INTO teams (id, name, code, country_id, image_path) VALUES (?, ?, ?, ?, ?)",
-                               (t.get("id"), t.get("name"), t.get("code"), t.get("country_id"), t.get("image_path")))
+                data = {
+                    "id": t.get("id"),
+                    "name": t.get("name"),
+                    "code": t.get("code"),
+                    "country_id": t.get("country_id"),
+                    "image_path": t.get("image_path")
+                }
+                valid_data = {k: v for k, v in data.items() if k in team_cols}
+                cols = ",".join(valid_data.keys())
+                placeholders = ",".join(["?"] * len(valid_data))
+                cursor.execute(f"INSERT OR IGNORE INTO teams ({cols}) VALUES ({placeholders})", list(valid_data.values()))
+
+        # 2. Archive Venues
+        venue_cols = get_cols("venues")
         v = f.get("venue")
         if v:
-            cursor.execute("INSERT OR IGNORE INTO venues (id, name, city, capacity, image_path) VALUES (?, ?, ?, ?, ?)",
-                           (v.get("id"), v.get("name"), v.get("city"), v.get("capacity"), v.get("image_path")))
+            data = {
+                "id": v.get("id"),
+                "name": v.get("name"),
+                "city": v.get("city"),
+                "capacity": v.get("capacity"),
+                "image_path": v.get("image_path")
+            }
+            valid_data = {k: v for k, v in data.items() if k in venue_cols}
+            cols = ",".join(valid_data.keys())
+            placeholders = ",".join(["?"] * len(valid_data))
+            cursor.execute(f"INSERT OR IGNORE INTO venues ({cols}) VALUES ({placeholders})", list(valid_data.values()))
+
+        # 3. Archive Players (from batting/bowling)
+        player_cols = get_cols("players")
+        players_to_save = []
         for b in f.get("batting", []):
-            p = b.get("batsman")
-            if p: cursor.execute("INSERT OR IGNORE INTO players (id, fullname, image_path, country_id) VALUES (?, ?, ?, ?)",
-                                 (p.get("id"), p.get("fullname"), p.get("image_path"), p.get("country_id")))
+            if b.get("batsman"): players_to_save.append(b.get("batsman"))
         for b in f.get("bowling", []):
-            p = b.get("bowler")
-            if p: cursor.execute("INSERT OR IGNORE INTO players (id, fullname, image_path, country_id) VALUES (?, ?, ?, ?)",
-                                 (p.get("id"), p.get("fullname"), p.get("image_path"), p.get("country_id")))
+            if b.get("bowler"): players_to_save.append(b.get("bowler"))
+            
+        for p in players_to_save:
+            data = {
+                "id": p.get("id"),
+                "fullname": p.get("fullname"),
+                "image_path": p.get("image_path"),
+                "country_id": p.get("country_id")
+            }
+            valid_data = {k: v for k, v in data.items() if k in player_cols}
+            cols = ",".join(valid_data.keys())
+            placeholders = ",".join(["?"] * len(valid_data))
+            cursor.execute(f"INSERT OR IGNORE INTO players ({cols}) VALUES ({placeholders})", list(valid_data.values()))
+
+        # 4. Archive Fixture
+        fixture_cols = get_cols("fixtures")
+        match_id = f.get("id")
         insert_data = {
             "id": match_id,
             "season_id": f.get("season_id"),
@@ -82,12 +124,12 @@ def _save_to_db_sync(f):
             "visitorteam_id": f.get("visitorteam_id"),
             "raw_json": json.dumps(f)
         }
-        valid_keys = [k for k in insert_data.keys() if k in fixture_cols]
-        cols_str = ",".join(valid_keys)
-        placeholders = ",".join(["?"] * len(valid_keys))
-        values = [insert_data[k] for k in valid_keys]
+        valid_data = {k: v for k, v in insert_data.items() if k in fixture_cols}
+        cols_str = ",".join(valid_data.keys())
+        placeholders = ",".join(["?"] * len(valid_data))
         sql = f"INSERT OR REPLACE INTO fixtures ({cols_str}) VALUES ({placeholders})"
-        cursor.execute(sql, values)
+        cursor.execute(sql, list(valid_data.values()))
+        
         conn.commit()
         conn.close()
     except Exception as e:

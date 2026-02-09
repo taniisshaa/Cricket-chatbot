@@ -1,0 +1,432 @@
+"""
+🔍 RAG RETRIEVER MODULE
+======================
+Smart database retrieval system that fetches EXACTLY the right data
+for any cricket query without hallucination.
+
+Features:
+- Auto table detection
+- Smart filtering
+- JSON parsing
+- Multi-source aggregation
+"""
+
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from datetime import datetime, timedelta
+import json
+from typing import Dict, List, Any, Optional
+from src.utils.utils_core import get_logger
+
+logger = get_logger("rag_retriever", "rag_retriever.log")
+
+DB_CONFIG = {
+    "dbname": "cricket_db",
+    "user": "postgres",
+    "password": "1234",
+    "host": "localhost",
+    "port": "5432"
+}
+
+class SmartRetriever:
+    """
+    Intelligent data retrieval system that knows EXACTLY where to look
+    for any cricket data.
+    """
+    
+    def __init__(self):
+        self.db_config = DB_CONFIG
+        
+    def _get_connection(self):
+        """Get PostgreSQL connection"""
+        return psycopg2.connect(**self.db_config)
+    
+    def _execute_query(self, sql: str, params: tuple = None) -> List[Dict]:
+        """Execute SQL and return results as list of dicts"""
+        try:
+            conn = self._get_connection()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            
+            if params:
+                cur.execute(sql, params)
+            else:
+                cur.execute(sql)
+            
+            results = cur.fetchall()
+            cur.close()
+            conn.close()
+            
+            # Convert to list of dicts and handle datetime
+            output = []
+            for row in results:
+                row_dict = dict(row)
+                for key, value in row_dict.items():
+                    if isinstance(value, datetime):
+                        row_dict[key] = value.isoformat()
+                output.append(row_dict)
+            
+            return output
+        except Exception as e:
+            logger.error(f"Query execution failed: {e}")
+            logger.error(f"SQL: {sql}")
+            return []
+    
+    async def retrieve_match_by_date(self, target_date: str, team_name: Optional[str] = None) -> List[Dict]:
+        """
+        Retrieve matches on a specific date.
+        
+        Args:
+            target_date: Date in YYYY-MM-DD format
+            team_name: Optional team filter
+        
+        Returns:
+            List of match records with scorecard data
+        """
+        logger.info(f"📅 Retrieving matches for date: {target_date}, team: {team_name}")
+        
+        if team_name:
+            sql = """
+            SELECT 
+                f.id, f.name, f.starting_at, f.status,
+                f.raw_json
+            FROM fixtures f
+            WHERE f.starting_at::date = %s
+            AND f.name ILIKE %s
+            ORDER BY f.starting_at DESC
+            LIMIT 10
+            """
+            results = self._execute_query(sql, (target_date, f"%{team_name}%"))
+        else:
+            sql = """
+            SELECT 
+                f.id, f.name, f.starting_at, f.status,
+                f.raw_json
+            FROM fixtures f
+            WHERE f.starting_at::date = %s
+            ORDER BY f.starting_at DESC
+            LIMIT 10
+            """
+            results = self._execute_query(sql, (target_date,))
+        
+        logger.info(f"✅ Found {len(results)} matches")
+        return self._process_match_results(results)
+    
+    async def retrieve_player_stats(
+        self, 
+        player_name: str, 
+        season_id: Optional[int] = None,
+        year: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Retrieve comprehensive player statistics.
+        
+        Args:
+            player_name: Player's name
+            season_id: Optional season filter
+            year: Optional year filter
+        
+        Returns:
+            Dict with batting and bowling stats
+        """
+        logger.info(f"🏏 Retrieving stats for player: {player_name}, season: {season_id}, year: {year}")
+        
+        # Get player ID first
+        player_sql = """
+        SELECT id, fullname, position_name, country_id
+        FROM players
+        WHERE fullname ILIKE %s
+        LIMIT 1
+        """
+        player_data = self._execute_query(player_sql, (f"%{player_name}%",))
+        
+        if not player_data:
+            logger.warning(f"❌ Player not found: {player_name}")
+            return {"error": f"Player '{player_name}' not found"}
+        
+        player = player_data[0]
+        player_id = player["id"]
+        
+        # Build batting stats query
+        batting_sql = """
+        SELECT 
+            bat->>'batsman'->>'fullname' AS player,
+            COUNT(*) as innings,
+            SUM((bat->>'score')::int) as total_runs,
+            AVG((bat->>'score')::int) as average,
+            MAX((bat->>'score')::int) as highest_score,
+            SUM((bat->>'four_x')::int) as fours,
+            SUM((bat->>'six_x')::int) as sixes,
+            AVG(((bat->>'score')::float * 100.0 / NULLIF((bat->>'balls')::float, 0))) as strike_rate
+        FROM fixtures f, jsonb_array_elements(f.raw_json->'batting') bat
+        WHERE bat->'batsman'->>'id' = %s
+        """
+        
+        params = [str(player_id)]
+        
+        if season_id:
+            batting_sql += " AND f.season_id = %s"
+            params.append(season_id)
+        elif year:
+            batting_sql += " AND EXTRACT(YEAR FROM f.starting_at) = %s"
+            params.append(year)
+        
+        batting_sql += " GROUP BY bat->>'batsman'->>'fullname'"
+        
+        batting_stats = self._execute_query(batting_sql, tuple(params))
+        
+        # Build bowling stats query
+        bowling_sql = """
+        SELECT 
+            bowl->>'bowler'->>'fullname' AS player,
+            COUNT(*) as matches,
+            SUM((bowl->>'wickets')::int) as total_wickets,
+            SUM((bowl->>'runs')::int) as runs_conceded,
+            AVG((bowl->>'rate')::float) as economy,
+            MAX((bowl->>'wickets')::int) as best_figures
+        FROM fixtures f, jsonb_array_elements(f.raw_json->'bowling') bowl
+        WHERE bowl->'bowler'->>'id' = %s
+        """
+        
+        params = [str(player_id)]
+        
+        if season_id:
+            bowling_sql += " AND f.season_id = %s"
+            params.append(season_id)
+        elif year:
+            bowling_sql += " AND EXTRACT(YEAR FROM f.starting_at) = %s"
+            params.append(year)
+        
+        bowling_sql += " GROUP BY bowl->>'bowler'->>'fullname'"
+        
+        bowling_stats = self._execute_query(bowling_sql, tuple(params))
+        
+        result = {
+            "player_info": player,
+            "batting": batting_stats[0] if batting_stats else {},
+            "bowling": bowling_stats[0] if bowling_stats else {}
+        }
+        
+        logger.info(f"✅ Retrieved stats for {player_name}")
+        return result
+    
+    async def retrieve_season_data(self, season_name: str, year: int) -> Dict[str, Any]:
+        """
+        Retrieve complete season information including winner, awards, standings.
+        
+        Args:
+            season_name: Name of the season (e.g., "IPL", "World Cup")
+            year: Year of the season
+        
+        Returns:
+            Dict with season data
+        """
+        logger.info(f"🏆 Retrieving season data: {season_name} {year}")
+        
+        # Get season ID
+        season_sql = """
+        SELECT id, name, year
+        FROM seasons
+        WHERE name ILIKE %s AND year = %s
+        LIMIT 1
+        """
+        season_data = self._execute_query(season_sql, (f"%{season_name}%", str(year)))
+        
+        if not season_data:
+            logger.warning(f"❌ Season not found: {season_name} {year}")
+            return {"error": f"Season '{season_name} {year}' not found"}
+        
+        season = season_data[0]
+        season_id = season["id"]
+        
+        # Get champion
+        champion_sql = """
+        SELECT t.name as winner_team, sc.runner_up_team_id
+        FROM season_champions sc
+        JOIN teams t ON sc.winner_team_id = t.id
+        WHERE sc.season_id = %s
+        """
+        champion = self._execute_query(champion_sql, (season_id,))
+        
+        # Get awards
+        awards_sql = """
+        SELECT 
+            sa.award_type,
+            p.fullname as player_name,
+            sa.value
+        FROM season_awards sa
+        LEFT JOIN players p ON sa.player_id = p.id
+        WHERE sa.season_id = %s
+        """
+        awards = self._execute_query(awards_sql, (season_id,))
+        
+        # Get all matches
+        matches_sql = """
+        SELECT 
+            f.id, f.name, f.starting_at, f.status,
+            f.raw_json->>'note' as result
+        FROM fixtures f
+        WHERE f.season_id = %s
+        ORDER BY f.starting_at
+        """
+        matches = self._execute_query(matches_sql, (season_id,))
+        
+        result = {
+            "season_info": season,
+            "champion": champion[0] if champion else None,
+            "awards": awards,
+            "total_matches": len(matches),
+            "matches": matches
+        }
+        
+        logger.info(f"✅ Retrieved season data for {season_name} {year}")
+        return result
+    
+    async def retrieve_head_to_head(
+        self, 
+        team_a: str, 
+        team_b: str,
+        limit: int = 10
+    ) -> List[Dict]:
+        """
+        Retrieve head-to-head match history between two teams.
+        
+        Args:
+            team_a: First team name
+            team_b: Second team name
+            limit: Maximum number of matches to return
+        
+        Returns:
+            List of match records
+        """
+        logger.info(f"⚔️ Retrieving H2H: {team_a} vs {team_b}")
+        
+        sql = """
+        SELECT 
+            f.id, f.name, f.starting_at, f.status,
+            f.raw_json->>'note' as result,
+            f.raw_json
+        FROM fixtures f
+        WHERE f.name ILIKE %s
+        AND f.name ILIKE %s
+        ORDER BY f.starting_at DESC
+        LIMIT %s
+        """
+        
+        results = self._execute_query(sql, (f"%{team_a}%", f"%{team_b}%", limit))
+        
+        logger.info(f"✅ Found {len(results)} H2H matches")
+        return self._process_match_results(results)
+    
+    async def retrieve_by_score(
+        self, 
+        score_value: int,
+        team_name: Optional[str] = None,
+        year: Optional[int] = None
+    ) -> List[Dict]:
+        """
+        Find matches where a specific score was made.
+        
+        Args:
+            score_value: The score to search for
+            team_name: Optional team filter
+            year: Optional year filter
+        
+        Returns:
+            List of matching fixtures
+        """
+        logger.info(f"🎯 Searching for score: {score_value}, team: {team_name}, year: {year}")
+        
+        sql = """
+        SELECT DISTINCT
+            f.id, f.name, f.starting_at,
+            sb->>'total' as score,
+            sb->>'wickets' as wickets,
+            sb->>'overs' as overs,
+            f.raw_json
+        FROM fixtures f,
+        jsonb_array_elements(f.raw_json->'scoreboards') sb
+        WHERE sb->>'type' = 'total'
+        AND (sb->>'total')::int = %s
+        """
+        
+        params = [score_value]
+        
+        if team_name:
+            sql += " AND f.name ILIKE %s"
+            params.append(f"%{team_name}%")
+        
+        if year:
+            sql += " AND EXTRACT(YEAR FROM f.starting_at) = %s"
+            params.append(year)
+        
+        sql += " ORDER BY f.starting_at DESC LIMIT 10"
+        
+        results = self._execute_query(sql, tuple(params))
+        
+        logger.info(f"✅ Found {len(results)} matches with score {score_value}")
+        return self._process_match_results(results)
+    
+    def _process_match_results(self, results: List[Dict]) -> List[Dict]:
+        """
+        Process raw match results to extract key information from raw_json.
+        
+        Args:
+            results: Raw database results
+        
+        Returns:
+            Processed results with extracted scorecard data
+        """
+        processed = []
+        
+        for match in results:
+            if "raw_json" in match and match["raw_json"]:
+                raw = match["raw_json"]
+                
+                if isinstance(raw, str):
+                    try:
+                        raw = json.loads(raw)
+                    except:
+                        raw = {}
+                
+                # Extract key information
+                match["innings_summary"] = []
+                for sb in raw.get("scoreboards", []):
+                    if sb.get("type") == "total":
+                        match["innings_summary"].append({
+                            "team_id": sb.get("team_id"),
+                            "score": sb.get("total"),
+                            "wickets": sb.get("wickets"),
+                            "overs": sb.get("overs")
+                        })
+                
+                match["top_batsmen"] = []
+                for bat in raw.get("batting", [])[:3]:  # Top 3
+                    match["top_batsmen"].append({
+                        "name": bat.get("batsman", {}).get("fullname"),
+                        "runs": bat.get("score"),
+                        "balls": bat.get("balls"),
+                        "sr": bat.get("rate")
+                    })
+                
+                match["top_bowlers"] = []
+                for bowl in raw.get("bowling", [])[:3]:  # Top 3
+                    match["top_bowlers"].append({
+                        "name": bowl.get("bowler", {}).get("fullname"),
+                        "wickets": bowl.get("wickets"),
+                        "runs": bowl.get("runs"),
+                        "overs": bowl.get("overs"),
+                        "economy": bowl.get("rate")
+                    })
+                
+                match["result"] = raw.get("note")
+                match["winner_team_id"] = raw.get("winner_team_id")
+                
+                # Remove the massive raw_json to save context
+                del match["raw_json"]
+            
+            processed.append(match)
+        
+        return processed
+
+# Global instance
+smart_retriever = SmartRetriever()
