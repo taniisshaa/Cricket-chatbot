@@ -443,7 +443,7 @@ async def run_research_agent(context_data, user_query):
         logger.error(f"Agent 1 (Research) Failed: {e}")
         return None
 
-async def generate_human_response(api_results, user_query, analysis, conversation_history=None):
+async def generate_human_response(api_results, user_query, analysis, conversation_history=None, strict_mode=False):
     client = get_ai_client()
     data_summary = []
     priorities = ["rag_evidence", "universal_query_result", "smart_query_result", "live_matches", "upcoming_schedule", "generic_today_data", "live_win_prediction", "prediction_analysis", "prediction_report", "specialist_analytics", "match_live_state", "final_match_scorecard", "final_match_info", "season_awards", "historical_season_totals", "historical_match_focus", "historical_db_series_summary", "historical_team_season_summary", "series_analytics", "found_score_match", "specific_player_stats", "match_details", "scorecard", "date_scorecards", "player_perf", "player_past_performance", "head_to_head_history", "series_winner_info", "standings"]
@@ -502,6 +502,9 @@ async def generate_human_response(api_results, user_query, analysis, conversatio
             """
 
     selected_prompt = PRESENTER_SYSTEM_PROMPT
+    if strict_mode:
+        selected_prompt += "\n\nSTRICT INSTRUCTION: Your previous response was flagged for inaccuracy. You MUST stick 100% to the [INPUT FROM SYSTEM/AGENT 1]. If a fact is NOT in the data, do NOT mention it. If requested data is missing, admit it."
+    
     messages = [{"role": "system", "content": selected_prompt}]
     if conversation_history:
         messages.extend(conversation_history[-6:])
