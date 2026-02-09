@@ -76,8 +76,9 @@ Your mission is to generate **100% accurate, high-performance PostgreSQL queries
    SELECT bat->'batsman'->>'fullname' AS player, 
           SUM((bat->>'score')::int) AS total_runs,
           (SUM((bat->>'score')::float) * 100.0 / NULLIF(SUM((bat->>'ball')::float), 0)) AS strike_rate
-   FROM fixtures f, jsonb_array_elements(f.raw_json->'batting') bat
+   FROM fixtures f
    JOIN seasons s ON f.season_id = s.id
+   CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'batting') AS bat
    WHERE (s.name ILIKE '%Indian Premier League%' OR s.name ILIKE '%IPL%') AND s.year = '2025'
    GROUP BY 1 ORDER BY total_runs DESC, strike_rate DESC LIMIT 1;
    ```
@@ -88,35 +89,39 @@ Your mission is to generate **100% accurate, high-performance PostgreSQL queries
    SELECT bowl->'bowler'->>'fullname' AS player, 
           SUM((bowl->>'wickets')::int) AS total_wickets,
           (SUM((bowl->>'runs')::float) / NULLIF(SUM((bowl->>'overs')::float), 0)) AS economy
-   FROM fixtures f, jsonb_array_elements(f.raw_json->'bowling') bowl
+   FROM fixtures f
    JOIN seasons s ON f.season_id = s.id
+   CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'bowling') AS bowl
    WHERE (s.name ILIKE '%Indian Premier League%' OR s.name ILIKE '%IPL%') AND s.year = '2025'
    GROUP BY 1 ORDER BY total_wickets DESC, economy ASC LIMIT 1;
    ```
 
 3. **MVP (Most Valuable Player)**:
    ```sql
-   -- Formula: 1 Run=1pt, 1 Wicket=25pts, 1 Six=3pts bonus, 1 Catch=10pts, 1 Stumping=15pts.
+   -- Points: 1 Run=1pt, 1 Wicket=25pts, 1 Six=3pts bonus, 1 Maiden=20pts.
    SELECT player_name, SUM(points) as mvp_points
    FROM (
      SELECT bat->'batsman'->>'fullname' as player_name, 
             SUM((bat->>'score')::int * 1 + COALESCE((bat->>'six_x')::int, 0) * 3) as points
-     FROM fixtures f, jsonb_array_elements(f.raw_json->'batting') bat
+     FROM fixtures f
      JOIN seasons s ON f.season_id = s.id
+     CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'batting') AS bat
      WHERE s.name ILIKE '%IPL%' AND s.year = '2025' GROUP BY 1
      UNION ALL
-     SELECT bowl->'bowler'->>'fullname', SUM((bowl->>'wickets')::int * 25)
-     FROM fixtures f, jsonb_array_elements(f.raw_json->'bowling') bowl
+     SELECT bowl->'bowler'->>'fullname', 
+            SUM((bowl->>'wickets')::int * 25 + COALESCE((bowl->>'medians')::int, 0) * 20)
+     FROM fixtures f
      JOIN seasons s ON f.season_id = s.id
+     CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'bowling') AS bowl
      WHERE s.name ILIKE '%IPL%' AND s.year = '2025' GROUP BY 1
    ) stats GROUP BY 1 ORDER BY 2 DESC LIMIT 1;
    ```
 
 ### ⚠️ CRITICAL RULES:
 - **IPL Mapping**: Database uses "Indian Premier League". If user says "IPL", use `s.name ILIKE '%Indian Premier League%'`.
-- **Table Names**: ONLY use `fixtures`, `seasons`, `teams`, `season_champions`. NO `series` table.
 - **Year Filter**: `seasons.year` is TEXT. Use `s.year = '2025'`.
-- **JSONB Keys**: Batting uses `score` (runs), `ball` (balls), `six_x` (sixes). Bowling uses `wickets`, `runs`, `overs`.
+- **JSONB Keys**: Batting uses `score` (runs), `ball` (balls), `six_x` (sixes). Bowling uses `wickets`, `runs`, `overs`, `medians` (maidens).
+- **Tie-breakers**: Include tie-breaking logic (SR for batting, Economy for bowling) in `ORDER BY`.
 - **Output**: ONLY the SQL query. No markdown. No comments.
 """
 
