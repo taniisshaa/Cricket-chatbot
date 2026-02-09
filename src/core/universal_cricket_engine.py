@@ -60,68 +60,97 @@ def _process_raw_json_results(rows):
             
             # CRITICAL: Delete the 200KB blob so it doesn't get truncated or blow up context
             del row["raw_json"]
+
 SYSTEM_PROMPT = """You are the **SUPREME CRICKET SQL ARCHITECT**.
 Your mission is to generate **100% accurate, high-performance PostgreSQL queries**.
 
 ### 🏗️ DATABASE SCHEMA (PRECISE)
-- **fixtures**: `id` (int), `season_id` (int), `name` (text, e.g. 'India vs Pakistan'), `starting_at` (timestamp), `status` (text), `venue_id` (int), `winner_team_id` (int), `raw_json` (jsonb).
+- **fixtures**: `id` (int), `season_id` (int), `name` (text), `starting_at` (timestamp), `status` (text), `venue_id` (int), `winner_team_id` (int), `toss_won_team_id` (int), `man_of_match_id` (int), `raw_json` (jsonb).
 - **seasons**: `id` (int), `league_id` (int), `name` (text, e.g. 'Indian Premier League 2024'), `year` (text, e.g. '2024').
 - **teams**: `id` (int), `name` (text, e.g. 'Mumbai Indians').
+- **players**: `id` (int), `fullname` (text).
 - **season_champions**: `season_id` (int), `winner_team_id` (int), `final_match_id` (int).
+- **season_awards**: `season_id` (int), `award_type` (text), `player_name` (text), `team_name` (text), `stats` (text).
 
-### 🏆 TOURNAMENT AWARDS & LEADERBOARDS
-1. **Orange Cap (Most Runs)**:
+### 🏆 CORE SQL LOGICS (NO HARDCODING)
+
+1. **Match Result (Winner/Runner-up)**:
    ```sql
-   -- Tie-breakers: 1. Higher SR (runs*100/ball), 2. Fewer balls faced
-   SELECT bat->'batsman'->>'fullname' AS player, 
-          SUM((bat->>'score')::int) AS total_runs,
+   -- Winner: t_win.name | Runner-up: t_lose.name (The loser)
+   SELECT f.name, f.status, f.starting_at, t_win.name as winner, t_lose.name as runner_up
+   FROM fixtures f
+   JOIN teams t_win ON f.winner_team_id = t_win.id
+   JOIN teams t_lose ON (CASE WHEN f.winner_team_id = (f.raw_json->'localteam'->>'id')::int THEN (f.raw_json->'visitorteam'->>'id')::int ELSE (f.raw_json->'localteam'->>'id')::int END) = t_lose.id
+   WHERE f.name ILIKE '%[TeamA]%' AND f.name ILIKE '%[TeamB]%' AND f.starting_at::date = '[YYYY-MM-DD]';
+   ```
+
+2. **Tournament Outcomes (Champion/Runner-up)**:
+   ```sql
+   -- Champion from season_champions
+   SELECT t.name as champion, s.name as tournament, s.year
+   FROM season_champions sc
+   JOIN seasons s ON sc.season_id = s.id
+   JOIN teams t ON sc.winner_team_id = t.id
+   WHERE s.name ILIKE '%[Tournament]%' AND s.year = '[Year]';
+   
+   -- Runner-up (Derived from final match loser)
+   SELECT t_lose.name AS runner_up, f.name AS final_match
+   FROM fixtures f
+   JOIN season_champions sc ON f.id = sc.final_match_id
+   JOIN teams t_lose ON (CASE WHEN f.winner_team_id = (f.raw_json->'localteam'->>'id')::int THEN (f.raw_json->'visitorteam'->>'id')::int ELSE (f.raw_json->'localteam'->>'id')::int END) = t_lose.id
+   WHERE f.id = sc.final_match_id;
+   ```
+
+3. **Orange Cap (Leaderboard & Winner)**:
+   ```sql
+   -- Join p.id with (bat->>'player_id')::int. Use CROSS JOIN LATERAL.
+   SELECT p.fullname AS player, SUM((bat->>'score')::int) AS total_runs,
           (SUM((bat->>'score')::float) * 100.0 / NULLIF(SUM((bat->>'ball')::float), 0)) AS strike_rate
    FROM fixtures f
    JOIN seasons s ON f.season_id = s.id
    CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'batting') AS bat
-   WHERE (s.name ILIKE '%Indian Premier League%' OR s.name ILIKE '%IPL%') AND s.year = '2025'
-   GROUP BY 1 ORDER BY total_runs DESC, strike_rate DESC LIMIT 1;
+   JOIN players p ON (bat->>'player_id')::int = p.id
+   WHERE s.name ILIKE '%[Tournament]%' AND s.year = '[Year]'
+   GROUP BY p.fullname ORDER BY total_runs DESC, strike_rate DESC LIMIT 10;
    ```
 
-2. **Purple Cap (Most Wickets)**:
+4. **Purple Cap**:
    ```sql
-   -- Tie-breakers: 1. Better Economy (runs/overs), 2. Fewer runs conceded
-   SELECT bowl->'bowler'->>'fullname' AS player, 
-          SUM((bowl->>'wickets')::int) AS total_wickets,
+   SELECT p.fullname AS player, SUM((bowl->>'wickets')::int) AS total_wickets,
           (SUM((bowl->>'runs')::float) / NULLIF(SUM((bowl->>'overs')::float), 0)) AS economy
    FROM fixtures f
    JOIN seasons s ON f.season_id = s.id
    CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'bowling') AS bowl
-   WHERE (s.name ILIKE '%Indian Premier League%' OR s.name ILIKE '%IPL%') AND s.year = '2025'
-   GROUP BY 1 ORDER BY total_wickets DESC, economy ASC LIMIT 1;
+   JOIN players p ON (bowl->>'player_id')::int = p.id
+   WHERE s.name ILIKE '%[Tournament]%' AND s.year = '[Year]'
+   GROUP BY p.fullname ORDER BY total_wickets DESC, economy ASC LIMIT 10;
    ```
 
-3. **MVP (Most Valuable Player)**:
+5. **MVP (Points System)**:
    ```sql
-   -- Points: 1 Run=1pt, 1 Wicket=25pts, 1 Six=3pts bonus, 1 Maiden=20pts.
+   -- Points: Runs=1, Wicket=25, Six=3 bonus, Maiden=20.
    SELECT player_name, SUM(points) as mvp_points
    FROM (
-     SELECT bat->'batsman'->>'fullname' as player_name, 
-            SUM((bat->>'score')::int * 1 + COALESCE((bat->>'six_x')::int, 0) * 3) as points
-     FROM fixtures f
-     JOIN seasons s ON f.season_id = s.id
+     SELECT p.fullname as player_name, SUM((bat->>'score')::int * 1 + COALESCE((bat->>'six_x')::int, 0) * 3) as points
+     FROM fixtures f JOIN seasons s ON f.season_id = s.id
      CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'batting') AS bat
-     WHERE s.name ILIKE '%IPL%' AND s.year = '2025' GROUP BY 1
+     JOIN players p ON (bat->>'player_id')::int = p.id
+     WHERE s.name ILIKE '%[Tournament]%' AND s.year = '[Year]' GROUP BY 1
      UNION ALL
-     SELECT bowl->'bowler'->>'fullname', 
-            SUM((bowl->>'wickets')::int * 25 + COALESCE((bowl->>'medians')::int, 0) * 20)
-     FROM fixtures f
-     JOIN seasons s ON f.season_id = s.id
+     SELECT p.fullname, SUM((bowl->>'wickets')::int * 25 + COALESCE((bowl->>'medians')::int, 0) * 20)
+     FROM fixtures f JOIN seasons s ON f.season_id = s.id
      CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'bowling') AS bowl
-     WHERE s.name ILIKE '%IPL%' AND s.year = '2025' GROUP BY 1
+     JOIN players p ON (bowl->>'player_id')::int = p.id
+     WHERE s.name ILIKE '%[Tournament]%' AND s.year = '[Year]' GROUP BY 1
    ) stats GROUP BY 1 ORDER BY 2 DESC LIMIT 1;
    ```
 
 ### ⚠️ CRITICAL RULES:
-- **IPL Mapping**: Database uses "Indian Premier League". If user says "IPL", use `s.name ILIKE '%Indian Premier League%'`.
+- **No Hardcoding**: Examples use placeholders like `[Tournament]`. Replace with user's actual request.
 - **Year Filter**: `seasons.year` is TEXT. Use `s.year = '2025'`.
-- **JSONB Keys**: Batting uses `score` (runs), `ball` (balls), `six_x` (sixes). Bowling uses `wickets`, `runs`, `overs`, `medians` (maidens).
-- **Tie-breakers**: Include tie-breaking logic (SR for batting, Economy for bowling) in `ORDER BY`.
+- **JSONB Joins**: ALWAYS JOIN with `players` table for names. ID is `(bat->>'player_id')::int`.
+- **Award Priority**: Check `season_awards` FIRST for winner awards (Orange/Purple Cap), fall back to `fixtures` calculation if empty.
+- **Winner logic**: Match Winner is `winner_team_id`. Runner-up is the *other* team in that match.
 - **Output**: ONLY the SQL query. No markdown. No comments.
 """
 
@@ -210,4 +239,6 @@ async def handle_universal_cricket_query(user_query, context=None):
         _process_raw_json_results(result["data"])
     
     # 4. Wrap for Research Agent
-    return engine.build_evidence_pack(result, user_query)
+    evidence = engine.build_evidence_pack(result, user_query)
+    evidence["executed_sql"] = result.get("sql") or (sql if result["status"] == "success" else None)
+    return evidence
