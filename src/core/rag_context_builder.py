@@ -51,7 +51,7 @@ class ContextBuilder:
             if match.get('result'):
                 context_parts.append(f"🏆 Result: {match['result']}")
             
-            # Innings summary
+            # Legacy Innings summary
             if match.get('innings_summary'):
                 context_parts.append("\n**Scorecard:**")
                 for inn in match['innings_summary']:
@@ -60,25 +60,40 @@ class ContextBuilder:
                         f"in {inn.get('overs')} overs"
                     )
             
-            # Top performers
-            if match.get('top_batsmen'):
+            # Universal Engine Score Summary
+            if match.get('innings_scores'):
+                context_parts.append("\n**Scorecard (Summary):**")
+                for score in match['innings_scores']:
+                    context_parts.append(f"  - {score}")
+            
+            # Universal Engine Batting
+            bat_summary = match.get('batting_summary') or match.get('top_batsmen')
+            if bat_summary:
                 context_parts.append("\n**Top Batsmen:**")
-                for bat in match['top_batsmen'][:3]:
-                    if bat.get('name'):
-                        context_parts.append(
-                            f"  - {bat['name']}: {bat.get('runs', 0)} runs "
-                            f"({bat.get('balls', 0)} balls, SR: {bat.get('sr', 0)})"
-                        )
-            
-            if match.get('top_bowlers'):
+                for bat in bat_summary[:4]:
+                    if isinstance(bat, dict):
+                        name = bat.get('p') or bat.get('name')
+                        runs = bat.get('r') or bat.get('runs')
+                        balls = bat.get('b') or bat.get('balls')
+                        if name:
+                            context_parts.append(f"  - {name}: {runs} ({balls})")
+
+            # Universal Engine Bowling
+            bowl_summary = match.get('bowling_summary') or match.get('top_bowlers')
+            if bowl_summary:
                 context_parts.append("\n**Top Bowlers:**")
-                for bowl in match['top_bowlers'][:3]:
-                    if bowl.get('name'):
-                        context_parts.append(
-                            f"  - {bowl['name']}: {bowl.get('wickets', 0)}/{bowl.get('runs', 0)} "
-                            f"in {bowl.get('overs', 0)} overs (Econ: {bowl.get('economy', 0)})"
-                        )
-            
+                for bowl in bowl_summary[:4]:
+                    if isinstance(bowl, dict):
+                        name = bowl.get('p') or bowl.get('name')
+                        w = bowl.get('w') or bowl.get('wickets')
+                        e = bowl.get('e') or bowl.get('economy')
+                        if name:
+                            context_parts.append(f"  - {name}: {w} wkts (Econ: {e})")
+
+            # Fallback for raw 'scorecard' blob
+            if match.get('scorecard'):
+                context_parts.append(f"\n**Raw Scorecard Data:** {str(match['scorecard'])[:500]}...")
+
             context_parts.append("\n" + "-" * 50)
         
         return "\n".join(context_parts)
@@ -250,9 +265,11 @@ class ContextBuilder:
         # Auto-detect data type
         if data_type == "auto":
             if isinstance(data, list) and len(data) > 0:
-                if "innings_summary" in data[0] or "name" in data[0]:
+                row = data[0]
+                # Enhanced detection for Universal Engine results
+                if "innings_summary" in row or "name" in row or "batting_summary" in row or "scoreboards" in row or "scorecard" in row:
                     data_type = "match"
-                elif "player_info" in data[0]:
+                elif "player_info" in row or "player_name" in row:
                     data_type = "player"
             elif isinstance(data, dict):
                 if "player_info" in data:

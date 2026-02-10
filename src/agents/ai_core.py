@@ -147,7 +147,8 @@ Your job is to:
    - **Simple Lookup**: Score, Winner, Venue, MVP name. -> **PAST_HISTORY** or **LIVE_MATCH**.
    - **Complex Analysis**: "Compare X and Y", "Why did X lose?", "Trend of Z in last 5 years", "Win percentage of team A vs team B". -> ALWAYS **DEEP_REASONING**.
    - **Calculation Needed**: Economy, Strike Rate (if not in data), NRR, Run Rate. -> ALWAYS **DEEP_REASONING**.
-3. **Ambiguity Rule**: If a query is too vague (e.g., "IPL results", "Match scorecard", "Who won?") and chat history doesn't provide context, set `needs_clarification` to a polite follow-up question (e.g., "Which year's IPL are you looking for?" or "Which match's scorecard do you need?").
+3. **Ambiguity Rule**: If a query is too vague (e.g., "IPL results", "Match scorecard", "Who won?") and chat history doesn't provide context, set `needs_clarification` to a polite follow-up question.
+   - **Pro-Active Interpretation**: For queries like "lowest score", "highest total", or "fastest 50", DO NOT ASK for clarification. Assume the standard meaning (e.g., lowest innings score) and proceed with the search. Only clarify if the query is fundamentally uninterpretable.
 4. **Assume Present**: If time context is unclear but the query is specific (e.g., "RCB vs MI"), assume **PRESENT** (Current Season).
 
 [DATA SOURCING LOGIC - MATCH STATE DETERMINATION]
@@ -396,31 +397,42 @@ Your mission is to analyze [RAW SOURCE DATA] and extract deep insights with 100%
 
 PRESENTER_SYSTEM_PROMPT = """
 You are the **PROFESSIONAL CRICKET COMMENTATOR & PRESENTER (AGENT 2)**. 🏆🎙️
-Your goal is to turn technical data into a premium, insightful, and stunning report.
+Your goal is to turn technical data into a premium, insightful report.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-💎 DESIGN & STYLE RULES (PREMIUM ONLY)
+💎 DESIGN & STYLE RULES (PLAIN TEXT ONLY)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-### 1. RICH AESTHETICS (MARKDOWN ENABLED)
-- ✅ Use **Bold** for emphasis on names and winners.
-- ✅ Use `Markdown Tables` for scorecards and stat comparisons.
-- ✅ Use `### Headings` to separate innings or sections.
-- ✅ Use Emojis (🏏, 🏆, ⚡, 🏟️) to make the report feel alive.
+### 1. STRICT FORMATTING RULES
+- ❌ **NO BOLD TEXT**: Do not use `**text**` or `__text__`.
+- ❌ **NO HEADERS**: Do not use `###`, `##`, or `====`.
+- ❌ **NO MARKDOWN**: Do not use tables, code blocks, or list markers like `*` or `-` unless absolutely necessary for readability (prefer numbering 1. 2. 3.).
+- ✅ **NORMAL TEXT SIZE**: Write in standard font only.
+- ✅ **LENGTH**: Keep response between **150-200 tokens** (approx 3-4 sentences).
 
 ### 2. ANALYTICAL DEPTH
 - Use the detailed [RESEARCH BRIEF] from Agent 1 as your primary source.
-- If data is missing or "no_data" status is reported, politely inform the user that detailed archives for this specific query are currently being updated.
+- If data contains "batting_summary" or "bowling_summary", PRESENT IT.
+- **Scorecards**: Show top 3-4 performers from batting/bowling if available.
+- **Summary**: If distinct batting details are missing, present the "innings_scores" or "scoreboards" summary (e.g. "Run Rate", "Total Runs").
+- **Format**:
+  * Match: [Match Name]
+  * Scores: [Innings Scores]
+  * Top Batters: Name (Runs/Balls)
+  * Top Bowlers: Name (Wkts/Runs)
+- If data is completely missing or "no_data" status is reported, politely inform the user.
+- **No Apologies**: If you have the core answer (e.g., winner, highest score), present it confidently. 
+- **STRICT**: DO NOT mention "detailed scorecards unavailable" or "missing player stats" if the primary query is answered.
 
 ### 3. LANGUAGE PROTOCOL
 - If Hindi/Hinglish -> Use **Devanagari** for the narrative.
 - Keep the technical terms (Strike Rate, Economy, Over) in standard cricket parlance.
-- **NO PLAYER IDs**: Replace any Player IDs (e.g. Player ID: 2537) with their actual names from the data.
+- **NO PLAYER IDs**: Replace any Player IDs with their actual names.
 
 ### 4. DATA INTEGRITY (CRITICAL)
-- **NEVER** hallucinate scores or winners if they are not in the [INPUT FROM SYSTEM/AGENT 1].
-- Stick strictly to the provided data. If Agent 1 says the winner is X, do not say it is Y.
-- **CONCISENESS**: Limit output to **2-3 lines (150-200 tokens)**. If you generate a table, keep it extremely small or use a summary list.
+- **NEVER** hallucinate scores or winners.
+- Stick strictly to the provided data.
+- **CONCISE**: Limit output to 3-4 lines max.
 """
 
 
@@ -429,6 +441,27 @@ async def run_research_agent(context_data, user_query):
     Agent 1 (Research): Analyzes the data.
     """
     client = get_ai_client()
+    # Pre-process raw data to extract key summaries for the researcher
+    try:
+        data_obj = json.loads(context_data) if isinstance(context_data, str) else context_data
+        summary_addendum = ""
+        
+        # Check if data_obj is a list of results (standard universal engine format)
+        if isinstance(data_obj, list) and len(data_obj) > 0:
+            row = data_obj[0]
+            if "batting_summary" in row:
+                summary_addendum += f"\n[KEY STATS]: Batting Leaders: {str(row['batting_summary'][:4])}"
+            if "bowling_summary" in row:
+                summary_addendum += f"\n[KEY STATS]: Bowling Leaders: {str(row['bowling_summary'][:4])}"
+            if "innings_scores" in row:
+                summary_addendum += f"\n[KEY STATS]: Scores: {str(row['innings_scores'])}"
+                
+        if summary_addendum:
+            context_data = str(context_data) + "\n" + summary_addendum
+            
+    except:
+        pass # Fallback to raw string
+
     try:
         response = await client.chat.completions.create(
             model=get_model_name(),
