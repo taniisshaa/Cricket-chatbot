@@ -11,7 +11,7 @@ from src.environment.backend_core import (
 )
 from src.environment.history_service import (
     get_player_past_performance, get_head_to_head_history,
-    past_db_get_standings, execute_smart_query
+    past_db_get_standings, execute_smart_query, sync_specific_match
 )
 from src.core.search_service import (
     find_match_id, find_series_smart, find_match_by_score
@@ -114,31 +114,98 @@ async def process_user_message(user_query, conversation_history=None):
          ctx_logger.info("No specialist data found.")
     if analysis.get("retrieve_chat_history") and conversation_history:
         api_results["personal_conversation_history"] = conversation_history
-    current_yr = datetime.now().year
-    try:
-        query_yr = int(str(year))
-    except:
-        query_yr = current_yr # Default to current if parse fails
+    # --- YEAR EXTRACTION & ROUTING LOGIC (CASE A, B, C) ---
+    q_years = entities.get("years") or []
+    if not q_years and entities.get("year"):
+        q_years = [entities.get("year")]
+    
+    # Simple regex fallback if extraction failed
+    if not q_years:
+        import re
+        q_years = re.findall(r'\b(19|20)\d{2}\b', user_query)
+    
+    # Ensure all are clean integers
+    clean_years = []
+    for y in q_years:
+        try:
+            clean_years.append(int(str(y)))
+        except: continue
+    q_years = clean_years
+
+    # If NO years were found at all, but intent is PAST, assume search is needed or career check
+    old_years = [y for y in q_years if y <= 2023]
+    new_years = [y for y in q_years if y >= 2024]
+
+    # Decide Source:
+    is_pure_historical = (len(q_years) > 0 and len(new_years) == 0)
+    is_pure_database = (len(q_years) > 0 and len(old_years) == 0)
+    is_mixed = (len(old_years) > 0 and len(new_years) > 0)
+    no_year_detected = (len(q_years) == 0)
+    
+    # Special Fix: If user says "2023", ensure it's PURE HISTORICAL
+    if 2023 in q_years and len(new_years) == 0:
+        is_pure_historical = True
+        is_pure_database = False
+
+    ctx_logger.info(f"Year Routing -> Years: {q_years} | Hist: {is_pure_historical} | DB: {is_pure_database} | Mixed: {is_mixed}")
+
     # --- DATA SOURCING LOGIC (Finished = DB, Live/Upcoming = API) ---
     q_lower = user_query.lower()
+    
+    # Logic: Detect if query is about TODAY
+    # This is critical because even if a match is "PAST" (finished), if it was TODAY,
+    # the Database might not have it yet, so we MUST check the Live API.
+    today_iso = datetime.now().strftime("%Y-%m-%d")
+    is_about_today = (target_date == today_iso) or (time_context == "PRESENT")
+    
     is_past_intent = (
         (intent in ["PAST_HISTORY", "RECORDS", "DEEP_REASONING"]) or
         (intent in ["PLAYER_STATS", "SERIES_STATS", "HEAD_TO_HEAD"] and time_context == "PAST") or
         (time_context == "PAST") or
-        ("yesterday" in q_lower or "कल" in q_lower or "kal" in q_lower or "last night" in q_lower)
+        (target_date and target_date < today_iso) or
+        is_pure_historical or is_mixed
     )
+    
+    # EXCEPTION: If it is about TODAY, we don't treat it as "Pure Past" for DB-only sourcing.
+    # We still allow RAG, but we will ensure Live API data is fetched later.
+    if is_about_today:
+        ctx_logger.info("📍 Query identifies as TODAY -> Ensuring Live API check regardless of 'Past' status.")
+        ctx_logger.info(f"LOGIC: Historical={is_pure_historical} | DB={is_pure_database} | Mixed={is_mixed} | NoYear={no_year_detected}")
+        
+        # Execute RAG Pipeline for Database years (>= 2024)
+        rag_result = {"status": "skipped", "data_count": 0}
+        if is_pure_database or is_mixed or (no_year_detected and intent != "GENERAL"):
+             ctx_logger.info("📡 Executing RAG Pipeline for Database context...")
+             rag_result = await execute_rag_pipeline(user_query, analysis)
+        
+        # Configure Internal Knowledge permission based on routing
+        if is_pure_historical or is_mixed or no_year_detected:
+             ctx_logger.info("📚 Enabling Internal Knowledge Fallback.")
+             api_results["internal_knowledge_allowed"] = True
+             
+             instructions = []
+             if is_mixed:
+                 instructions.append(f"[MIXED QUERY DETECTED]: Years {old_years} are Historical. Years {new_years} are in Database.")
+                 instructions.append("1. Answer data for years <= 2023 using your internal knowledge.")
+                 instructions.append("2. Answer data for years >= 2024 using the provided database results.")
+             elif is_pure_historical:
+                 instructions.append(f"[HISTORICAL QUERY]: For years {old_years}, use ONLY internal knowledge.")
+             elif no_year_detected:
+                 instructions.append("[CAREER/GENERAL QUERY]: No specific year detected. Use internal knowledge for career stats and database for recent (2024-25) matches.")
 
-    if is_past_intent:
-        ctx_logger.info(f"LOGIC: Intent/Query indicates FINISHED/PAST match (Time: {time_context}) -> EXECUTING RAG PIPELINE.")
-        
-        # Execute RAG Pipeline
-        rag_result = await execute_rag_pipeline(user_query, analysis)
-        
+             if "rag_evidence" not in api_results: api_results["rag_evidence"] = ""
+             api_results["rag_evidence"] += "\n" + "\n".join(instructions)
+             
+             # If it was pure historical and RAG was skipped/failed, force success to proceed to Presenter
+             if is_pure_historical:
+                 rag_result["status"] = "success"
+
         if rag_result.get("status") == "success":
             ctx_logger.info(f"✅ RAG Success: Retrieved {rag_result.get('data_type')} data ({rag_result.get('data_count')} records)")
             
             # Store the main context evidence for the LLM
-            api_results["rag_evidence"] = rag_result.get("context")
+            if "rag_evidence" not in api_results:
+                 api_results["rag_evidence"] = rag_result.get("context")
             
             # Use raw data to populate specific fields if needed
             if rag_result.get("data_type") == "universal":
@@ -480,7 +547,8 @@ async def process_user_message(user_query, conversation_history=None):
                 ctx_logger.warning("Squad comparison feature is currently unavailable.")
         except Exception as e:
             ctx_logger.error(f"Tool {tool} execution failed: {e}")
-    if intent == "LIVE_MATCH" or any(tool in ["get_live_matches"] for tool in required_tools):
+    # FINAL CHECK: If it's about TODAY, we MUST fetch from Live API even if intent is PAST.
+    if is_about_today or intent == "LIVE_MATCH" or any(tool in ["get_live_matches"] for tool in required_tools):
         live_data = await get_live_matches()
         if live_data and live_data:
              api_results["live_matches"] = live_data
@@ -494,13 +562,55 @@ async def process_user_message(user_query, conversation_history=None):
             m for m in m_data.get("data", [])
             if m.get("date") == today_iso or any(s in str(m.get("status", "")).lower() for s in active_statuses)
         ]
-        if not api_results.get("live_matches") and not api_results["generic_today_data"]:
+        if not api_results.get("live_matches") and not api_results.get("generic_today_data"):
              api_results["upcoming_broad_schedule"] = m_data.get("data", [])[:10]
-    elif not api_results and intent != "general_qa":
+        
+        # PROACTIVE DISCOVERY: If teams are mentioned and we are looking at TODAY, find the match!
+        if (t_name or o_name) and api_results.get("generic_today_data"):
+            found_today_match = None
+            norm_q = _normalize(user_query)
+            for m in api_results["generic_today_data"]:
+                m_name = _normalize(m.get("name", ""))
+                if (t_name and _is_team_match(t_name, m_name)) or (o_name and _is_team_match(o_name, m_name)):
+                    found_today_match = m
+                    break
+            
+            if found_today_match:
+                ctx_logger.info(f"🎯 Discovered relevant TODAY match: {found_today_match.get('name')}")
+                api_results["today_match_discovery"] = found_today_match
+                # If finished, we want the result
+                if "finish" in str(found_today_match.get("status", "")).lower():
+                    api_results["today_finished_match_result"] = {
+                        "match": found_today_match.get("name"),
+                        "result": found_today_match.get("status"),
+                        "scorecard_hint": "Match finished today. Use the Live API data provided."
+                    }
+    
+    # LOGIC: If it's a GENERAL query, we enable internal knowledge by default
+    if intent == "GENERAL":
+        api_results["internal_knowledge_allowed"] = True
+        if "rag_evidence" not in api_results: api_results["rag_evidence"] = ""
+        api_results["rag_evidence"] += "\n[SYSTEM]: This is a general query. Use your internal knowledge to answer."
+
+    elif not api_results and intent not in ["GENERAL", "general_qa"]:
         api_results["search_failed"] = True
         if s_name: api_results["missing_entity"] = f"Series: {s_name} ({year})"
         if p_name: api_results["missing_entity"] = f"Player: {p_name}"
     
+    # --- RESULT CLEANUP FOR HISTORICAL FALLBACK ---
+    if api_results.get("internal_knowledge_allowed"):
+        # If we allowed internal knowledge, we shouldn't show "search failed" or "missing entity"
+        # as these flags trigger 'sorry' messages in the AI.
+        api_results.pop("search_failed", None)
+        api_results.pop("missing_entity", None)
+        
+        if is_pure_historical:
+             # For years <= 2023, the API/DB errors are expected and should be hidden
+             # to prevent the AI from apologizing for missing DB data.
+             api_results.pop("api_error", None)
+             if api_results.get("smart_query_result") == []:
+                 api_results.pop("smart_query_result", None)
+
     # Layer 3: Generate response and verify
     final_response = await generate_human_response(api_results, user_query, analysis, conversation_history)
     
@@ -508,7 +618,8 @@ async def process_user_message(user_query, conversation_history=None):
     if api_results and intent not in ["GENERAL", "UPCOMING"]:
         from src.agents.ai_core import verify_response
         ctx_logger.info("🔍 LAYER 3: Verifying response accuracy...")
-        verification_result = await verify_response(user_query, api_results, final_response)
+        detected_lang = analysis.get("language", "english")
+        verification_result = await verify_response(user_query, api_results, final_response, detected_lang=detected_lang)
         
         if verification_result.startswith("FAIL"):
             ctx_logger.warning(f"❌ Verification Failed: {verification_result}")
@@ -530,9 +641,16 @@ async def process_user_message(user_query, conversation_history=None):
     ctx_logger.info("              SEARCH/REASONING SUMMARY")
     ctx_logger.info("--------------------------------------------------")
     ctx_logger.info(f"1. INTENT: {intent}")
-    ctx_logger.info(f"2. YEAR CONTEXT: {year}")
+    ctx_logger.info(f"2. YEAR CONTEXT: {q_years if q_years else year}")
     ctx_logger.info(f"3. TOOLS EXECUTED: {list(api_results.keys())}")
-    ctx_logger.info(f"4. DATA SOURCE: {'DATABASE (Universal Engine)' if is_past_intent else 'LIVE API'}")
+    
+    datasource = "LIVE API"
+    if is_past_intent:
+        if is_pure_historical: datasource = "INTERNAL KNOWLEDGE (GPT Memory)"
+        elif is_mixed: datasource = "HYBRID (DB + GPT)"
+        else: datasource = "DATABASE (Universal Engine)"
+        
+    ctx_logger.info(f"4. DATA SOURCE: {datasource}")
     ctx_logger.info("--------------------------------------------------")
     ctx_logger.info("              FINAL AI RESPONSE")
     ctx_logger.info("--------------------------------------------------")

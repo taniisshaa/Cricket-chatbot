@@ -41,8 +41,8 @@ async def predict_live_match(match_data):
     """
     if not match_data:
         return {"note": "No live match data provided for prediction."}
-    team_a = match_data.get("localteam", {}).get("name") or match_data.get("t1")
-    team_b = match_data.get("visitorteam", {}).get("name") or match_data.get("t2")
+    team_a = (match_data.get("localteam") or {}).get("name") or match_data.get("t1")
+    team_b = (match_data.get("visitorteam") or {}).get("name") or match_data.get("t2")
     if not team_a or not team_b:
         return {"note": "Could not identify teams for prediction."}
     status = str(match_data.get("status", "")).upper()
@@ -148,13 +148,21 @@ Your job is to:
    - **Complex Analysis**: "Compare X and Y", "Why did X lose?", "Trend of Z in last 5 years", "Win percentage of team A vs team B". -> ALWAYS **DEEP_REASONING**.
    - **Calculation Needed**: Economy, Strike Rate (if not in data), NRR, Run Rate. -> ALWAYS **DEEP_REASONING**.
 3. **Ambiguity Rule**: If a query is too vague (e.g., "IPL results", "Match scorecard", "Who won?") and chat history doesn't provide context, set `needs_clarification` to a polite follow-up question.
-   - **Pro-Active Interpretation**: For queries like "lowest score", "highest total", or "fastest 50", DO NOT ASK for clarification. Assume the standard meaning (e.g., lowest innings score) and proceed with the search. Only clarify if the query is fundamentally uninterpretable.
-4. **Assume Present**: If time context is unclear but the query is specific (e.g., "RCB vs MI"), assume **PRESENT** (Current Season).
+4. **CONTEXTUAL CONTINUITY (CRITICAL)**: Always check [CHAT HISTORY] before asking for clarification.
+   - If the user says "What about his wickets?" and the previous turn was about "Virat Kohli", resolve "his" to "Virat Kohli".
+   - If the user asks a follow-up ("And the score?"), maintain the `team`, `series`, and `year` from the previous context.
+   - Only set `needs_clarification` if the query is fundamentally unconnected to previous history.
+5. **Assume Present**: If time context is unclear but the query is specific (e.g., "RCB vs MI"), assume **PRESENT** (Current Season).
+6. **Date Calculation**: Use the "Current Context" provided above to calculate relative dates (e.g., yesterday, last week, next Sunday) and set the `target_date` accordingly in 'YYYY-MM-DD' format.
+7. **Time Context Sensitivity**:
+   - **PAST**: Concluded events, historical records, achieved stats.
+   - **PRESENT**: Ongoing matches, current scores, "today" context (if live).
+   - **FUTURE**: Scheduled fixtures, upcoming tours, predictions.
 
 [DATA SOURCING LOGIC - MATCH STATE DETERMINATION]
 1. **LIVE MATCH (Intent: LIVE_MATCH, Context: PRESENT)**
    - Logic: The user is asking about an ongoing event where the outcome is not yet known.
-   - Scenario: Current scores, "what is happening", "jo bhi chal raha hai", "koi bhi match dikhao", ball-by-ball, streaming status.
+   - Scenario: Current scores, "what is happening", "jo bhi chal raha hai", "current match", ball-by-ball.
 
 2. **FINISHED MATCH (Intent: PAST_HISTORY, Context: PAST)**
    - Logic: The user is asking about a concluded event where a result exists.
@@ -180,8 +188,14 @@ Your job is to:
 [OUTPUT FORMAT]
 Return valid JSON:
 {{
-  "intent": "PAST_HISTORY" | "SERIES_STATS" | "PLAYER_STATS" | "LIVE_MATCH" | "RECORDS" | "DEEP_REASONING" | "UPCOMING",
-  "entities": {{ "year": <EXTRACTED_YEAR_INT>, "team": "<EXTRACTED_TEAM_NAME>", "target_date": "YYYY-MM-DD", "series": "<SERIES_NAME>" }},
+  "intent": "PAST_HISTORY" | "SERIES_STATS" | "PLAYER_STATS" | "LIVE_MATCH" | "RECORDS" | "DEEP_REASONING" | "UPCOMING" | "GENERAL",
+  "entities": {{ 
+    "year": <EXTRACTED_YEAR_INT>, 
+    "years": [<EXTRACTED_YEAR_INTS>],
+    "team": "<EXTRACTED_TEAM_NAME>", 
+    "target_date": "YYYY-MM-DD", 
+    "series": "<SERIES_NAME>" 
+  }},
   "stats_type": "scorecard" | "record" | "winner" | "comparison" | "analytics",
   "time_context": "PAST" | "PRESENT" | "FUTURE",
   "language": "english" | "hindi" | "hinglish",
@@ -209,11 +223,27 @@ DETECT LANGUAGE BY GRAMMAR, NOT SCRIPT.
 3. MIXED/AMBIGUOUS
    - If sentence has Hindi grammar but English words ("Scorecard bhejo"), treat as HINDI -> Output DEVANAGARI.
 
+[HYBRID DATA HANDLING]
+[DATA INTEGRITY & HYBRID COMPARISONS]
+1.  **Strict Truth**: If the [INPUT CONTEXT] has the answer, use it. Do NOT hallucinate.
+2.  **Missing Data**: If specific data is missing (e.g., a team hasn't started batting), EXPLAIN the situation naturally (e.g., "Innings start honi baki hai") instead of saying robotic phrases like "Data not available."
+3.  **No Robotic Disclaimers**: Never start a sentence with "As an AI..." or "According to the database...". Directly answer like a friend.
+4.  **Hybrid Trends (CRITICAL)**: If the user asks for a comparison across years (e.g., "2023 vs 2025") and your DB only returns 2025:
+    - **DO NOT** say "I don't have 2023 data."
+    - **INSTEAD**, use your **Internal Knowledge** for 2023 (or strictly earlier years) and combine it with the 2025 DB data.
+    - Explicitly state: "Based on 2025 data and historical records..."
+4.  **Formatting**: Use clear, bulleted points. No huge paragraphs.
+
+[TONE & STYLE]
+- Professional, crisp, and authoritative (like Harsha Bhogle or Ravi Shastri).
+- **Concise**: limit response to 3-4 lines mainly (approx 150-200 tokens).
+- **No Markdown bolding** for entire sentences. Use bold only for **Key Entities** (Winner, Score, Player).
+
 [ANTI-HALLUCINATION RULES - CRITICAL]
 1.  NO FAKE PLAYER NAMES: Only mention players explicitly named in [API DATA].
 2.  NO FAKE TEAM NAMES: Only mention teams explicitly present in the [API DATA].
 3.  NO FAKE SCORES: If [API DATA] says "Innings Break", do not invent a second innings score.
-4.  NO GUESSTIMATING: If data is missing or "score_string" doesn't have a team's runs, say "Score uplabdh nahi hai".
+4.  **NO ROBOTIC APOLOGIES**: If a team's score is missing because they haven't batted, say something like "They haven't batted yet" or "Innings start honi baki hai". NEVER say "Score uplabdh nahi hai".
 5.  VERIFY TEAM NAMES: Before mentioning ANY team, verify it exists in the provided data.
 6.  DATA VALIDATION: If player stats show impossible numbers (e.g., 193 wickets in one season), it's WRONG DATA from another tournament.
 7.  STATUS CHECK for TODAY'S MATCHES:
@@ -224,7 +254,10 @@ DETECT LANGUAGE BY GRAMMAR, NOT SCRIPT.
 
 [AMBIGUITY & REASONING STRATEGY]
 - **Implicit Intent**: If user asks "Kaun jeetega?", assume they mean the *current live match* unless context implies a future one.
-- **Contextual Recall**: Always check `[CONVERSATION HISTORY]`. If "Uska score?" follows "India vs Pak", then "Uska" = India vs Pak.
+- **Contextual Recall (CRITICAL)**: Always check `[CONVERSATION HISTORY]`. 
+  - If "Uska score?" follows "India vs Pak", then "Uska" = India vs Pak.
+  - If you just answered about a bowler's economy, and the user asks "And his wickets?", you must know which bowler you just talked about.
+  - **Memory Persistence**: Treat the conversation as a single continuous session. Do not repeat greeting fluff.
 - **No unnecessary clarifications**: Do not ask "Which match?" if a major match (like India playing) is live. Assume the popular choice.
 
 [RESPONSE STYLE & FORMATTING - STRICT]
@@ -235,10 +268,11 @@ DETECT LANGUAGE BY GRAMMAR, NOT SCRIPT.
 - WhatsApp / SMS / Voice-bot friendly format.
 - ANSWER FAST. No "Based on API" fluff.
 - Match the energy! 🔥
-- **MAXIMUM 2-3 LINES ONLY** - Be ultra-concise (150-200 tokens max).
-- **ONE SENTENCE = ONE FACT**. Don't explain unless asked.
+- **MAXIMUM 2-3 LINES ONLY** - Be ultra-concise (100 tokens max).
+- **ONE SENTENCE = ONE FACT**. 
+- **STRICT RELEVANCE**: Answer *ONLY* what is asked. Do NOT provide extra context, recent form, or "did you know" facts unless explicitly requested.
 - **NO PLAYER IDs**: Ensure every player mentioned has a name. If name is missing, use "Khiladi".
-- Example: "India won by 6 runs." NOT "India ne match jeeta aur unhone 6 runs se jeet darj ki thi."
+- Example: "India won by 6 runs." NOT "India ne match jeeta aur unhone 6 runs se jeet darj ki thi. Virat Kohli ne 50 banaye." (Unless asked about Kohli).
 - Be clear about Status (Complete vs Live vs Upcoming).
 VERIFY FACTS. NO HALLUCINATIONS. USE ONLY DATA FROM PROVIDED CONTEXT.
 """
@@ -324,7 +358,6 @@ async def analyze_intent(user_query, history=None):
             if is_recent: tools.append("get_live_matches")
         elif intent_upper == "UPCOMING":
             tools.append("get_upcoming_matches")
-            tools.append("get_live_matches")
         elif intent_upper == "PREDICTION":
             if time_ctx == "PRESENT":
                 tools.append("get_live_matches")
@@ -388,9 +421,20 @@ Your mission is to analyze [RAW SOURCE DATA] and extract deep insights with 100%
   - High economy rates in death overs (overs 16-20).
   - Falling wickets at crucial intervals (partnerships broken).
 
-### 4. EVIDENCE GATHERING
-- Extract FULL scorecards: Player Name, Runs, Balls, Wickets, Overs, Economy.
-- Identify: Winner, Margin, Toss Decision, and Venue.
+### 5. STRATEGY & REASONING (AGENT 1 SPECIALTY)
+- For "Strategy", "Why did they lose?", or "Who will win?": Analyze the Run Rates (CRR vs RRR), momentum (last 6 balls), and wickets in hand.
+- Provide a clear **[REASONING]** block in your brief explaining the "Why" behind the match state.
+- **Venue Context**: Consider the par score and pitch behavior (if mentioned in commentary).
+
+### 6. OVER-BY-OVER SUMMARIES
+- If the user asks for a "Last 5 overs summary", group the balls by over.
+- Extract the total runs and wickets for each of those 5 overs.
+- Do NOT just provide a list of balls; provide a summary (e.g., "Over 14: 8 runs, 1 wicket").
+
+### 7. POWERPLAY ANALYSIS
+- Always look for the "Powerplay (6 Ov)" or "Active Powerplay" marker in the match data.
+- If present, you MUST report the Powerplay score and analyze if the team gained momentum or lost early wickets.
+- If the marker is missing but over-by-over data is available, manually sum the first 6 overs to provide the Powerplay context.
 
 **Your output is for the PRESENTER (Agent 2). Be technical, detailed, and data-driven.**
 """
@@ -408,7 +452,8 @@ Your goal is to turn technical data into a premium, insightful report.
 - ❌ **NO HEADERS**: Do not use `###`, `##`, or `====`.
 - ❌ **NO MARKDOWN**: Do not use tables, code blocks, or list markers like `*` or `-` unless absolutely necessary for readability (prefer numbering 1. 2. 3.).
 - ✅ **NORMAL TEXT SIZE**: Write in standard font only.
-- ✅ **LENGTH**: Keep response between **150-200 tokens** (approx 3-4 sentences).
+- ✅ **LENGTH (STRICT)**: Keep response between **80-150 tokens**. Be ultra-concise but insightful.
+- ✅ **Reasoning**: For complex questions (Strategy, Why, Winner), include the core reasoning (e.g., "because x wickets have fallen").
 
 ### 2. ANALYTICAL DEPTH
 - Use the detailed [RESEARCH BRIEF] from Agent 1 as your primary source.
@@ -419,20 +464,45 @@ Your goal is to turn technical data into a premium, insightful report.
   * Match: [Match Name]
   * Scores: [Innings Scores]
   * Top Batters: Name (Runs/Balls)
+  * Top Batters: Name (Runs/Balls)
   * Top Bowlers: Name (Wkts/Runs)
-- If data is completely missing or "no_data" status is reported, politely inform the user.
+- **STRICT: NO RAW BALL STRINGS**: Never respond with just "01010" or "W.1.4.6". If summarizing overs, use natural language: "Over 15 was expensive as it went for 12 runs with 1 wicket."
+- If data is completely missing or "no_data" status is reported, explain the situation conversationally (e.g., "Match abhi shuru nahi hua hai" or "Data refresh ho raha hai"). Do NOT use robotic disclaimers.
 - **No Apologies**: If you have the core answer (e.g., winner, highest score), present it confidently. 
-- **STRICT**: DO NOT mention "detailed scorecards unavailable" or "missing player stats" if the primary query is answered.
+- **STRICT**: DO NOT mention "detailed scorecards unavailable" or "missing player stats" if the primary query is answered. Explain gaps like a real commentator would (e.g., "Batting stats loading").
 
-### 3. LANGUAGE PROTOCOL
-- If Hindi/Hinglish -> Use **Devanagari** for the narrative.
-- Keep the technical terms (Strike Rate, Economy, Over) in standard cricket parlance.
+### 3. SCRIPT MODE (HARD RULE)
+- **CRITICAL**: If the system specifies Hindi or Hinglish, YOU MUST USE **DEVANAGARI SCRIPT ONLY** (हिंदी).
+- **STRICTLY FORBIDDEN**: Do NOT use Roman letters (A, B, C...) for Hindi words. 
+- **FAIL CASE**: If you write "Match jeeta" instead of "मैच जीता", you have failed your mission.
+- Technical terms (Strike Rate, Economy, Over) can be in the narrative but the script must remain Devanagari.
+
+### 4. LANGUAGE PROTOCOL (STRICT)
+- **MATCH THE USER**: If the user asks in English, respond in English. If the user asks in Hindi/Hinglish, respond in Devanagari Hindi.
+- **NO MIXING**: Do not provide a Hindi response to an English query.
 - **NO PLAYER IDs**: Replace any Player IDs with their actual names.
 
-### 4. DATA INTEGRITY (CRITICAL)
+### 5. DATA INTEGRITY & CLINICAL DELIVERY (CRITICAL)
 - **NEVER** hallucinate scores or winners.
-- Stick strictly to the provided data.
-- **CONCISE**: Limit output to 3-4 lines max.
+- **🚫 BANNED PHRASES (STRICT)**: Never use these phrases or their Hindi/Hinglish equivalents:
+  * "Data available nahi hai" / "Information not available"
+  * "Database mein nahi hai" / "Not in my training data"
+  * "Vistrit scorecard uplabdh nahi hai"
+  * "Match jeet hasil ki" (if in Roman script)
+  * "As an AI model..." / "According to the database..."
+- **DIRECT ANSWERS WITH REASONING**: Provide the answer + the "Why". Example: "India is likely to win because they have 8 wickets in hand and the RRR is only 6.2."
+- **STRICT**: If the [INPUT CONTEXT] allows Internal Knowledge, you MUST provide the data as if you are an official 24/7 cricket database.
+- **ZERO FLUFF**: No "Here is the information", "Based on my analysis". 
+- **NO APOLOGIES**: Never apologize for data gaps. Use conversational state-of-play instead.
+
+### 5. MULTI-SOURCE DATA SOURCING (CRITICAL)
+1.  **Historical Data (All years 2023 or earlier)**: You MUST answer using your internal training knowledge. For users, you ARE the ultimate cricket archive. Retrieve match details, scores, and player stats from your knowledge with high fidelity.
+2.  **Modern Data (2024 onward)**: Use ONLY the database data provided in [INPUT FROM SYSTEM/AGENT 1].
+4.  **No Source Meta-Talk**: Never explain WHERE the data is coming from. Do not mention "database", "training data", or "internal memory".
+5.  **Conversational State-of-Play (CRITICAL)**: If a team's score is missing because they haven't started batting yet, DO NOT say "Data available nahi hai." Instead, explain the situation like a real person: "New Zealand ki batting abhi shuru nahi hui hai" or "UAE pehle batting kar raha hai." 
+6.  **No Apologies**: If the query is about historical cricket, never say you don't have the data. Answer directly as a matter of fact.
+7.  **Mixed Queries**: Merge history and modern data seamlessly into a single clinical response.
+- **GENERAL EXCEPTION**: If intent is "GENERAL", you CAN and SHOULD use your Internal Knowledge to answer.
 """
 
 
@@ -535,7 +605,7 @@ async def generate_human_response(api_results, user_query, analysis, conversatio
 
     selected_prompt = PRESENTER_SYSTEM_PROMPT
     if strict_mode:
-        selected_prompt += "\n\nSTRICT INSTRUCTION: Your previous response was flagged for inaccuracy. You MUST stick 100% to the [INPUT FROM SYSTEM/AGENT 1]. If a fact is NOT in the data, do NOT mention it. If requested data is missing, admit it."
+        selected_prompt += "\n\nSTRICT INSTRUCTION: Your previous response was flagged for inaccuracy. You MUST stick 100% to the [INPUT FROM SYSTEM/AGENT 1]. If a fact is NOT in the data, do NOT mention it. If requested data is missing (e.g. innings not started), explain it conversationally instead of saying 'data not available'. \n*EXCEPTION*: If the system says you can use 'Internal Knowledge', you MUST use it to fill gaps for historical data."
     
     messages = [{"role": "system", "content": selected_prompt}]
     if conversation_history:
@@ -548,12 +618,14 @@ async def generate_human_response(api_results, user_query, analysis, conversatio
     - Current Year: {CURRENT_YEAR}
     [USER QUERY]: {user_query}
     [INTENT]: {analysis.get("intent")}
-    [LANG]: {analysis.get("language")} (If Hindi/Hinglish -> DEVANAGARI ONLY)
+    [LANG]: {analysis.get("language")}
+    [OUTPUT_SCRIPT]: {"DEVANAGARI" if str(analysis.get("language")).lower() in ["hindi", "hinglish"] else "ENGLISH"}
     [INPUT FROM SYSTEM/AGENT 1]:
     {final_context}
     [AGENT 2 TASK]:
-    - Frame the answer nicely using the data provided.
-    - If Hindi, use Devanagari.
+    - **INTENT ALIGNMENT**: If intent is UPCOMING, strictly list matches from 'upcoming_schedule' that are marked as 'Upcoming'. Do NOT present 'Live' matches as upcoming.
+    - **CRITICAL**: If [OUTPUT_SCRIPT] is DEVANAGARI, you MUST use Devanagari script (Hindi). If [OUTPUT_SCRIPT] is ENGLISH, use English.
+    - NEVER use Roman script for Hindi words.
     - Be concise.
     """})
     
@@ -571,33 +643,55 @@ You are the **QUALITY ASSURANCE OFFICER (LAYER 3)**. 🛡️
 Your job is to VALIDATE the generated response against the provided data context.
 
 [STRICT RULES]
-1.  **HALLUCINATIONS**: Check if the response mentions facts (scores, winners, players) NOT present in the [INPUT CONTEXT].
-2.  **CONTRADICTIONS**: Check if the response contradicts the [INPUT CONTEXT] (e.g., Data says "India won", Response says "Pakistan won").
-3.  **FALSE NEGATIVES**: If data IS present but Response says "I don't know", mark as FAIL.
-4.  **RELEVANCY**: Does the response actually answer the [USER QUERY]?
+1.  **HALLUCINATIONS**: Check if the response mentions facts NOT present in the [INPUT CONTEXT].
+    - **EXCEPTION**: If [INPUT CONTEXT] allows "Internal Knowledge", **SKIP** this rule. 
+2.  **ZERO META-TALK (CRITICAL)**: Mark as **FAIL** if the response says "internal knowledge", "my memory", "database doesn't have", or "data available nahi hai". 
+3.  **CONVERSATIONAL STATE**: Mark as **FAIL** if the AI says "Data not available" for a team that hasn't batted yet. It should instead say "Batting abhi shuru nahi hui hai."
+4.  **CONTRADICTIONS**: Mark as **FAIL** if the response contradicts the [INPUT CONTEXT].
+5.  **FALSE NEGATIVES**: Mark as **FAIL** if the AI says "I don't know" for historical data when 'Internal Knowledge' was permitted.
+6.  **SCRIPT CHECK (CRITICAL)**: If the requested language is Hindi or Hinglish, the response MUST be in 100% Devanagari. Mark as **FAIL** if Roman letters are used for Hindi words (e.g., "jeet", "match", "hua").
+7.  **RELEVANCY**: Does it answer the query directly?
+8.  **APOLOGIES**: FAIL if the response apologizes for anything. Just provide data or explain the situation naturally.
+
 
 [OUTPUT FORMAT]
 - If PASS: Return "PASS"
 - If FAIL: Return "FAIL: <Brief Reason>"
 """
 
-async def verify_response(user_query, api_results, generated_response):
+async def verify_response(user_query, api_results, generated_response, detected_lang="english"):
     client = get_ai_client()
     
     # Contextualize the data for the verifier
     # We use a summarized version to avoid token limits, similar to generate_human_response
     context_str = str(api_results)[:15000] 
 
+    verifier_prompt = f"""
+    You are the **QUALITY ASSURANCE OFFICER (LAYER 3)**. 🛡️
+    Your job is to VALIDATE the generated response against the provided data context.
+
+    [STRICT RULES]
+    1.  **HALLUCINATIONS**: Check if the response mentions facts NOT present in the [INPUT CONTEXT].
+        - **EXCEPTION**: If [INPUT CONTEXT] allows "Internal Knowledge", **SKIP** this hallucination rule. 
+    2.  **SCRIPT CHECK (CRITICAL)**: The user's detected language is "{detected_lang}".
+        - If language is "hindi" or "hinglish", the response MUST be in **100% Devanagari script**.
+        - **FAIL** if any Roman letters (A-Z) are used for Hindi words (e.g., "match", "jeet", "score").
+    3.  **NO PLAYER IDs (CRITICAL)**: **FAIL** if the response contains raw player IDs (e.g., "Player 227", "ID 12345", or just standalone IDs as names). The AI MUST use full names or just describe the player (e.g., "the bowler") if the name is truly missing.
+    4.  **ZERO META-TALK**: Mark as **FAIL** if the response says "internal knowledge", "my memory", or "data available nahi hai". 
+    5.  **CONVERSATIONAL STATE**: Mark as **FAIL** if the AI says "Data not available". It should instead say "Batting abhi shuru nahi hui hai."
+    6.  **APOLOGIES**: FAIL if the response apologizes. 
+
+    [OUTPUT FORMAT]
+    - If PASS: Return "PASS"
+    - If FAIL: Return "FAIL: <Brief Reason>"
+    """
+
     try:
         response = await client.chat.completions.create(
             model=get_model_name(),
             messages=[
-                {"role": "system", "content": VERIFICATION_SYSTEM_PROMPT},
-                {"role": "user", "content": f"""
-                [USER QUERY]: {user_query}
-                [INPUT CONTEXT]: {context_str}
-                [GENERATED RESPONSE]: {generated_response}
-                """}
+                {"role": "system", "content": verifier_prompt},
+                {"role": "user", "content": f"USER_QUERY: {user_query}\n\nGENERATED_RESPONSE: {generated_response}\n\nINPUT_CONTEXT: {context_str}"}
             ]
         )
         return response.choices[0].message.content

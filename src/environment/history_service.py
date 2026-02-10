@@ -271,3 +271,64 @@ async def sync_recent_finished_matches(days_back=7, season_id=None, start_date_s
     
     logger.info(f"Sync Complete. Updated {count} matches.")
     return {"status": "success", "updated": count}
+
+async def sync_specific_match(match_id):
+    """
+    Syncs one specific match ID immediately into PostgreSQL.
+    """
+    logger.info(f"⚡ FAST SYNC: Fetching Match {match_id} into PostgreSQL...")
+    conn = get_history_conn()
+    try:
+        params = {
+            "include": "localteam,visitorteam,venue,batting.batsman,bowling.bowler,runs,scoreboards,manofmatch",
+            "per_page": 1
+        }
+        res = await sportmonks_cric(f"/fixtures/{match_id}", params, use_cache=False)
+        if not res.get("ok"):
+             return {"status": "error", "message": "Match not found in API"}
+        
+        f = res.get("data", {})
+        if not f: return {"status": "error", "message": "Empty data"}
+        
+        with conn.cursor() as cursor:
+            f_id = f.get("id")
+            s_id = f.get("season_id")
+            local = f.get("localteam", {}).get("name") or "Team A"
+            visitor = f.get("visitorteam", {}).get("name") or "Team B"
+            name = f"{local} vs {visitor}"
+            start_at = f.get("starting_at")
+            status = f.get("status")
+            venue_id = f.get("venue_id")
+            winner_id = f.get("winner_team_id")
+            
+            raw_data = {
+                "batting": f.get("batting", []),
+                "bowling": f.get("bowling", []),
+                "scoreboards": f.get("scoreboards", []),
+                "manofmatch": f.get("manofmatch", {}),
+                "toss_won_team_id": f.get("toss_won_team_id"),
+                "winner_team_id": winner_id,
+                "localteam": f.get("localteam"),
+                "visitorteam": f.get("visitorteam"),
+                "venue": f.get("venue"),
+                "runs": f.get("runs", [])
+            }
+            
+            cursor.execute("""
+                INSERT INTO fixtures (id, season_id, name, starting_at, status, venue_id, winner_team_id, raw_json)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(id) DO UPDATE SET 
+                    status=excluded.status, 
+                    winner_team_id=excluded.winner_team_id,
+                    raw_json=excluded.raw_json,
+                    starting_at=excluded.starting_at,
+                    name=excluded.name
+            """, (f_id, s_id, name, start_at, status, venue_id, winner_id, json.dumps(raw_data)))
+            conn.commit()
+            logger.info(f"✅ FAST SYNC SUCCESS: Match {match_id} is now in PostgreSQL.")
+            return {"status": "success", "match": name}
+    except Exception as e:
+        logger.error(f"Fast Sync Failed for {match_id}: {e}")
+        return {"status": "error", "message": str(e)}
+    finally:
+        conn.close()

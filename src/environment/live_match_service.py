@@ -71,8 +71,15 @@ def _normalize_status_live(status):
     if "delay" in s or "rain" in s or "interrupted" in s: return "Delayed"
     if "finished" in s or "completed" in s or "won by" in s or "ended" in s: return "Finished"
     return "Scheduled"
-def _get_player_name(lineup_map, pid):
-    """Helper to get player name from lineup map."""
+def _get_player_name(lineup_map, pid, record=None):
+    """Helper to get player name from lineup map or nested record info."""
+    # 1. Try record-level nested info (SportMonks sometimes nests player in the batting/bowling record)
+    if record and isinstance(record, dict) and "player" in record:
+        p_obj = record.get("player") or {}
+        name = p_obj.get("fullname") or p_obj.get("lastname")
+        if name: return name
+
+    # 2. Try lineup map
     p = lineup_map.get(pid)
     if not p: return f"Player {pid}"
     return p.get("fullname") or p.get("lastname")
@@ -118,7 +125,7 @@ def _normalize_live_match_data(sm_match):
                        b.get("batsmanout_id") or
                        b.get("bowling_player_id"))
              if not is_out:
-                  p_name = _get_player_name(player_map, b.get("player_id"))
+                  p_name = _get_player_name(player_map, b.get("player_id"), record=b)
                   active_marker = "*" if b.get("active") else ""
                   runs = b.get("score", 0)
                   balls = b.get("ball", 0)
@@ -127,7 +134,7 @@ def _normalize_live_match_data(sm_match):
         bowlers_list = sm_match.get("bowling") or []
         active_bowler = next((bw for bw in bowlers_list if bw.get("active")), None)
         if active_bowler:
-             p_name = _get_player_name(player_map, active_bowler.get("player_id"))
+             p_name = _get_player_name(player_map, active_bowler.get("player_id"), record=active_bowler)
              o = active_bowler.get("overs", 0)
              r = active_bowler.get("runs", 0)
              w = active_bowler.get("wickets", 0)
@@ -136,6 +143,24 @@ def _normalize_live_match_data(sm_match):
              pass
         recent_balls_str = ""
         last_wicket_str = ""
+        
+        # 1. Try to find the last wicket from the Batting list (more reliable for "who took it")
+        # We look for the batsman who is out and has the highest number of balls or latest entry
+        dismissed_players = []
+        for b in batters_list:
+            # result_id in SportMonks: 1=Not Out, 2=Out, 3=Still Batting
+            # but usually we check if there's a bowling_player_id
+            if b.get("bowling_player_id") or b.get("batsmanout_id"):
+                 p_name = _get_player_name(player_map, b.get("player_id"), record=b)
+                 bowler_name = _get_player_name(player_map, b.get("bowling_player_id")) if b.get("bowling_player_id") else "Unknown"
+                 dismissed_players.append({"name": p_name, "bowler": bowler_name, "id": b.get("id") or 0})
+        
+        if dismissed_players:
+            # Assuming the last one in the list is the most recent wicket
+            last_p = dismissed_players[-1]
+            last_wicket_str = f"Last Wicket: {last_p['name']} (Bowled by {last_p['bowler']})"
+
+        # 2. Try to supplement from Balls data if available (often has 'how' out)
         balls_data = sm_match.get("balls", [])
         if balls_data:
             recent_chunk = balls_data[-12:] if len(balls_data) > 12 else balls_data
@@ -148,8 +173,7 @@ def _normalize_live_match_data(sm_match):
                 if is_wicket:
                     display_char = "W"
                     out_p = _get_player_name(player_map, ball.get("batsmanout_id"))
-                    how = "Out"
-                    last_wicket_str = f"Last Wicket: {out_p} ({how})"
+                    last_wicket_str = f"Last Wicket: {out_p} (Out)" # Specific Ball Detail
                 elif run_sc == 4: display_char = "4"
                 elif run_sc == 6: display_char = "6"
                 else: display_char = str(run_sc)
@@ -222,10 +246,44 @@ def _normalize_live_match_data(sm_match):
         except Exception as e:
              logger.error(f"Analytics Calc Error: {e}")
 
+        # --- POWERPLAY DETECTION (Robust Fallback) ---
+        powerplay_str = ""
+        try:
+            scoreboards = sm_match.get("scoreboards") or []
+            # 1. Look for explicit powerplay marker
+            for sb in scoreboards:
+                if sb.get("type") == "powerplay" and sb.get("number") == 1:
+                    pp_score = sb.get("score")
+                    pp_wickets = sb.get("wickets")
+                    team_id = sb.get("team_id")
+                    t_name = local if str(team_id) == str(local_id) else visitor
+                    powerplay_str = f" | Powerplay (6 Ov): {t_name} {pp_score}/{pp_wickets}"
+                    break
+            
+            # 2. Fallback: If no explicit marker but over > 6, look for 6-over score in regular scoreboards
+            if not powerplay_str:
+                for sb in scoreboards:
+                    if sb.get("type") in ["total", "extra"] and sb.get("overs") == 6:
+                        pp_score = sb.get("score")
+                        pp_wickets = sb.get("wickets")
+                        team_id = sb.get("team_id")
+                        t_name = local if str(team_id) == str(local_id) else visitor
+                        powerplay_str = f" | Powerplay (6 Ov): {t_name} {pp_score}/{pp_wickets}"
+            
+            # 3. Active Powerplay: If currently in first 6 overs, the current score is the PP score
+            if not powerplay_str and current_score_obj:
+                cur_ov = float(current_score_obj.get("overs", 0))
+                if 0 < cur_ov <= 6.0:
+                    pp_score = current_score_obj.get("score")
+                    pp_wickets = current_score_obj.get("wickets")
+                    powerplay_str = f" | Active Powerplay ({cur_ov} Ov): {current_batting_team} {pp_score}/{pp_wickets}"
+        except:
+            pass
+
         detailed_str += analytics_str
         inn_break_msg = " [INNINGS BREAK - 1st Inning Over, 2nd Yet to Start]" if formatted_status == "Innings Break" else ""
         starting_time = sm_match.get("starting_at", "N/A")
-        final_score_string = f"Match Date: {starting_time} | " + " | ".join(scores_txt) + detailed_str + recent_balls_str + (" | " + last_wicket_str if last_wicket_str else "") + overs_rem_str + inn_break_msg
+        final_score_string = f"Match Date: {starting_time} | " + " | ".join(scores_txt) + powerplay_str + detailed_str + recent_balls_str + (" | " + last_wicket_str if last_wicket_str else "") + overs_rem_str + inn_break_msg
         
         # Determine if actually finished
         is_actually_finished = (
@@ -272,7 +330,7 @@ async def fetch_realtime_matches(filter_team=None):
     Fetches strictly LIVE matches from /livescores endpoint.
     If filter_team is provided, filters by that team name.
     """
-    includes = "localteam,visitorteam,runs,venue,batting,bowling,lineup,balls"
+    includes = "localteam,visitorteam,runs,scoreboards,venue,lineup,batting,bowling"
     res_live = await sportmonks_live_request("/livescores", {"include": includes})
     live_matches = []
     logger.info(f"Fetch Realtime Matches called. Filter: {filter_team}")
@@ -305,7 +363,7 @@ async def fetch_realtime_matches(filter_team=None):
     if not live_matches:
         logger.info("No live matches found in livescores, checking today's fixtures fallback...")
         today_str = datetime.now().strftime("%Y-%m-%d")
-        includes = "localteam,visitorteam,runs,venue,batting,bowling,lineup,balls"
+        includes = "localteam,visitorteam,runs,venue,scoreboards,batting,bowling"
         res_today = await sportmonks_live_request(f"/fixtures", {
              "filter[starts_between]": f"{today_str},{today_str}",
              "include": includes
@@ -442,7 +500,7 @@ def extract_live_state(scorecard_data):
         dism = (b.get("dismissal") or "").lower()
         if not dism or dism in ["batting", "not out"]:
             batsmen.append({
-                "name": b.get("batsman", {}).get("name"),
+                "name": (b.get("batsman") or {}).get("name"),
                 "runs": b.get("r"),
                 "balls": b.get("b")
             })
@@ -450,7 +508,7 @@ def extract_live_state(scorecard_data):
     if curr.get("bowling"):
         active = curr["bowling"][-1] # Simplification
         bowler = {
-            "name": active.get("bowler", {}).get("name"),
+            "name": (active.get("bowler") or {}).get("name"),
             "w": active.get("w"),
             "r": active.get("r")
         }

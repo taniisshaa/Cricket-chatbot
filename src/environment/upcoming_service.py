@@ -6,13 +6,22 @@ async def get_upcoming_matches(days=14, check_date=None):
     """
     Fetches upcoming fixtures for the next X days or a specific date.
     """
+    today_obj = datetime.now()
+    today_str = today_obj.strftime("%Y-%m-%d")
+    
     if check_date:
-        start_date = check_date
-        end_date = check_date
+        # If the user specifically asked for 'Upcoming matches' and the date is TODAY,
+        # we should show the full upcoming range starting from today.
+        if check_date == today_str:
+            start_date = today_str
+            end_date = (today_obj + timedelta(days=days)).strftime("%Y-%m-%d")
+        else:
+            start_date = check_date
+            end_date = check_date
     else:
-        today = datetime.now()
-        start_date = today.strftime("%Y-%m-%d")
-        end_date = (today + timedelta(days=days)).strftime("%Y-%m-%d")
+        start_date = today_str
+        end_date = (today_obj + timedelta(days=days)).strftime("%Y-%m-%d")
+        
     logger.info(f"Fetching Upcoming Matches: {start_date} to {end_date}")
     includes = "localteam,visitorteam,venue"
     res = await sportmonks_cric("/fixtures", {
@@ -20,14 +29,20 @@ async def get_upcoming_matches(days=14, check_date=None):
         "include": includes,
         "sort": "starting_at"
     }, use_cache=True, ttl=3600)
+    
     matches = []
     if res.get("ok"):
         raw = res.get("data", [])
         for m in raw:
             norm = _normalize_sportmonks_to_app_format(m)
-            if check_date or norm.get("status") not in ["Finished", "Completed", "Abandoned"]:
+            # ONLY include matches that haven't started yet (Upcoming) 
+            if norm.get("status") == "Upcoming":
                  matches.append(norm)
-    if not matches and check_date:
+            elif check_date and check_date != today_str and check_date == norm.get("date"):
+                 # Single day specific request - show regardless of status for that day
+                 matches.append(norm)
+                 
+    if not matches and check_date and check_date != today_str:
         logger.info(f"No matches found on {check_date}, expanding search +/- 2 days...")
         try:
             dt_obj = datetime.strptime(check_date, "%Y-%m-%d")
@@ -42,10 +57,13 @@ async def get_upcoming_matches(days=14, check_date=None):
                 raw_exp = res_exp.get("data", [])
                 for m in raw_exp:
                     norm = _normalize_sportmonks_to_app_format(m)
-                    norm["note"] = f"(Originally searched {check_date})"
-                    matches.append(norm)
+                    # Even in expansion, we only want UPCOMING matches if we are in this service
+                    if norm.get("status") == "Upcoming":
+                        norm["note"] = f"(Originally searched {check_date})"
+                        matches.append(norm)
         except Exception as e:
             logger.error(f"Fallback search failed: {e}")
+            
     logger.info(f"Found {len(matches)} upcoming matches from {start_date} to {end_date}")
     return {
         "ok": True,

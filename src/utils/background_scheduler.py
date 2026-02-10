@@ -26,16 +26,21 @@ def run_sync_loop():
 
     while True:
         try:
-            # Wait for 15 minutes before next check
-            time.sleep(900) 
+            # --- HIGH FREQUENCY SYNC FOR TODAY'S MATCHES ---
+            # Wait for 2 minutes before next check (Reduced from 15 mins for 'Automatic' feel)
+            time.sleep(120) 
             
-            logger.info("Running Periodic Sync (Last 24 Hours)...")
-            # Sync only last 1 day to be efficient
+            logger.info("Running High-Frequency Sync (Last 24 Hours)...")
+            # Sync last 1 day. This ensures finished matches from today land in DB ASAP.
             asyncio.run(sync_recent_finished_matches(days_back=1))
+            
+            # Every 6 cycles (approx 12 mins), do a deeper sync for last 3 days
+            # to catch any delayed status updates.
+            # (Logic can be added here if needed, but 1 day is sufficient for 'Today')
             
         except Exception as e:
             logger.error(f"Periodic Sync Failed: {e}")
-            time.sleep(60) # Wait a bit before retrying on error
+            time.sleep(30) # Wait a bit before retrying on error
 
 def start_background_sync():
     """

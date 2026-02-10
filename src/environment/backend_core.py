@@ -88,7 +88,7 @@ async def getSeriesInfo(series_id, includes=None, **kwargs):
         "data": {"info": info.get("data"), "matchList": [m for m in fixtures.get("data", [])]}
     }
 async def getMatchScorecard(match_id, **kwargs):
-    return await sportmonks_cric(f"/fixtures/{match_id}", {"include": "localteam,visitorteam,runs,batting.batsman,bowling.bowler,venue,balls,scoreboards,manofmatch"}, **kwargs)
+    return await sportmonks_cric(f"/fixtures/{match_id}", {"include": "localteam,visitorteam,runs,scoreboards,venue,manofmatch,batting,bowling"}, **kwargs)
 async def getMatchInfo(match_id, **kwargs):
     return await sportmonks_cric(f"/fixtures/{match_id}", {"include": "localteam,visitorteam,venue,manofmatch"}, **kwargs)
 async def getMatchSquad(match_id, **kwargs):
@@ -130,11 +130,29 @@ async def get_live_matches(**kwargs): return await getCurrentMatches(**kwargs)
 async def get_series_matches_by_id(series_id, **kwargs):
     res = await getSeriesInfo(series_id, **kwargs)
     return {"data": res.get("data", {}).get("matchList", [])}
+def _normalize_status(status):
+    s = str(status or "").upper()
+    mapping = {
+        "NS": "Upcoming",
+        "UPCOMING": "Upcoming",
+        "SCHEDULED": "Upcoming",
+        "LIVE": "Live",
+        "INNINGS BREAK": "Innings Break",
+        "IB": "Innings Break",
+        "ABAN": "Abandoned",
+        "CANCL": "Cancelled",
+        "POSTP": "Postponed",
+        "FINISHED": "Finished",
+        "COMPLETED": "Finished"
+    }
+    return mapping.get(s, s.title())
+
 def _normalize_sportmonks_to_app_format(sm_match):
     m_id = sm_match.get("id")
-    local = sm_match.get("localteam", {}).get("name", "Local")
-    visitor = sm_match.get("visitorteam", {}).get("name", "Visitor")
-    status = sm_match.get("status", "")
+    local = (sm_match.get("localteam") or {}).get("name", "Local")
+    visitor = (sm_match.get("visitorteam") or {}).get("name", "Visitor")
+    status_raw = sm_match.get("status", "")
+    status = _normalize_status(status_raw)
     mom = sm_match.get("manofmatch")
     mom_data = None
     if mom:
@@ -149,7 +167,7 @@ def _normalize_sportmonks_to_app_format(sm_match):
     if batting:
         sorted_bat = sorted(batting, key=lambda x: x.get("score") or x.get("runs") or 0, reverse=True)[:2]
         for b in sorted_bat:
-             p = b.get("batsman", {})
+             p = b.get("batsman") or {}
              name = p.get("fullname") or p.get("name") or "Unknown"
              runs = b.get("score") or b.get("runs") or 0
              balls = b.get("ball") or b.get("balls") or 0
@@ -159,7 +177,7 @@ def _normalize_sportmonks_to_app_format(sm_match):
         for b in sorted_bowl:
              w = b.get("wickets") or 0
              if w > 0:
-                 p = b.get("bowler", {})
+                 p = b.get("bowler") or {}
                  name = p.get("fullname") or p.get("name") or "Unknown"
                  runs_conceded = b.get("runs") or 0
                  overs = b.get("overs") or 0
@@ -168,9 +186,10 @@ def _normalize_sportmonks_to_app_format(sm_match):
         "id": m_id,
         "name": f"{local} vs {visitor}",
         "status": status,
+        "original_status": status_raw,
         "note": sm_match.get("note", ""),
         "date": sm_match.get("starting_at", "").split("T")[0],
-        "venue": sm_match.get("venue", {}).get("name"),
+        "venue": (sm_match.get("venue") or {}).get("name"),
         "t1": local, "t2": visitor,
         "matchEnded": status in ["Finished", "Completed", "Abandoned"],
         "scoreboards": sm_match.get("scoreboards", []),
@@ -186,7 +205,7 @@ async def fetch_last_finished_match(team_name=None, opponent_name=None, match_ty
     logger.info(f"Fetching last finished match. Team: {team_name} | Opponent: {opponent_name}")
     params = {
         "sort": "-starting_at",
-        "include": "localteam,visitorteam,runs,venue,manofmatch,bowling.bowler,batting.batsman",
+        "include": "localteam,visitorteam,runs,venue,manofmatch,lineup,scoreboards,batting,bowling",
     }
     res = await sportmonks_cric("/fixtures", params)
     if not res.get("ok"):
