@@ -3,7 +3,7 @@ import json
 import streamlit as st
 from datetime import datetime
 from src.utils.utils_core import get_logger
-from src.agents.ai_core import analyze_intent, run_reasoning_agent, generate_human_response
+from src.agents.ai_core import analyze_intent, run_reasoning_agent, generate_human_response, predict, predict_live_match
 from src.utils.match_utils import _normalize, _is_team_match
 from src.environment.backend_core import (
     get_upcoming_matches, get_todays_matches, get_live_matches,
@@ -101,6 +101,11 @@ async def process_user_message(user_query, conversation_history=None):
     s_name = entities.get("series") or st.session_state.chat_context.get("last_series")
     year = entities.get("year") or st.session_state.chat_context.get("last_year") or datetime.now().year
     update_context(s_name, entities.get("year"), t_name, p_name, o_name)
+    
+    # Context Fallback: Ensure tools use persistent context if entities are missing
+    t_name = t_name or st.session_state.chat_context.get("last_team")
+    o_name = o_name or st.session_state.chat_context.get("last_opponent")
+    p_name = p_name or st.session_state.chat_context.get("last_player")
     needs_clarification = analysis.get("needs_clarification", None)
     if needs_clarification:
         return needs_clarification
@@ -545,6 +550,45 @@ async def process_user_message(user_query, conversation_history=None):
                     logger.info(f"Deep Analysis Bundle added for match: {m_id}")
             elif tool == "compare_squads" or tool == "get_squad_comparison":
                 ctx_logger.warning("Squad comparison feature is currently unavailable.")
+            elif tool == "predict_match_analysis":
+                ctx_logger.info(f"🔮 Prediction Analysis for {t_name} vs {o_name}")
+                if t_name and o_name:
+                    p_res = await predict(
+                        prediction_type="match_analysis",
+                        team_a=t_name,
+                        team_b=o_name,
+                        date=target_date,
+                        venue=entities.get("venue")
+                    )
+                    api_results["prediction_report"] = p_res
+                else:
+                    api_results["api_error"] = "To predict a winner, I need two team names. Please specify which teams."
+            elif tool == "predict_live_match":
+                ctx_logger.info("🔴 Live Match Prediction Requested")
+                # Ensure we have live data
+                if "live_matches" not in api_results:
+                     l_data = await get_live_matches()
+                     if l_data: api_results["live_matches"] = l_data
+                
+                live_source = api_results.get("live_matches")
+                target_live = None
+                if live_source and isinstance(live_source, dict):
+                    all_live = live_source.get("data", [])
+                    # Find match matching teams
+                    for m in all_live:
+                        m_n = _normalize(m.get("name", ""))
+                        if (t_name and _is_team_match(t_name, m_n)) or (o_name and _is_team_match(o_name, m_n)):
+                            target_live = m
+                            break
+                    # Fallback: if only one live match, assume that
+                    if not target_live and len(all_live) == 1:
+                        target_live = all_live[0]
+                        
+                if target_live:
+                     pred_l = await predict_live_match(target_live)
+                     api_results["live_win_prediction"] = pred_l
+                else:
+                     api_results["api_error"] = "No relevant live match found to predict."
         except Exception as e:
             ctx_logger.error(f"Tool {tool} execution failed: {e}")
     # FINAL CHECK: If it's about TODAY, we MUST fetch from Live API even if intent is PAST.

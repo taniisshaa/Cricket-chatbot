@@ -1,0 +1,50 @@
+[
+  {
+    "role": "user",
+    "content": "Give me live matches??"
+  },
+  {
+    "role": "assistant",
+    "content": "Match: Afghanistan vs South Africa\n\nScores: South Africa 187/6 (20 overs)\n\nTop Batters: \n1. Quinton de Kock (59 off 41 balls)\n2. Aiden Markram (61 off 28 balls)\n\nTop Bowlers:\n1. Azmatullah Omarzai (3 wickets for 41 runs)\n2. Rashid Khan (2 wickets for 28 runs)\n\nThe match is currently at the innings break. Afghanistan needs 188 runs to win."
+  },
+  {
+    "role": "user",
+    "content": "toss kon jeeta tha??"
+  },
+  {
+    "role": "assistant",
+    "content": "अफगानिस्तान ने टॉस जीतकर पहले गेंदबाजी करने का फैसला किया था।"
+  },
+  {
+    "role": "user",
+    "content": "South africa ka score abhi kitna chal raha hai?"
+  },
+  {
+    "role": "assistant",
+    "content": "दक्षिण अफ्रीका ने अपनी पारी खत्म करते हुए 20 ओवर में 187/6 रन बनाए हैं। अब मैच में ब्रेक है और अफगानिस्तान को जीत के लिए 188 रन चाहिए।"
+  },
+  {
+    "role": "user",
+    "content": "Total wickets kitne gir chuke hain?"
+  },
+  {
+    "role": "assistant",
+    "content": "दक्षिण अफ्रीका की पहली पारी में कुल 6 विकेट गिरे हैं। वे 20 ओवर में 187/6 का स्कोर बना चुके हैं। अब अफगानिस्तान के लिए लक्ष्य 188 रन का है।"
+  },
+  {
+    "role": "user",
+    "content": "winning possibility kya hai dono team mai se kon jeet sakta hai??"
+  },
+  {
+    "role": "assistant",
+    "content": "Could you provide more details like the strengths, current form, or historical performance of both teams for a more accurate analysis?"
+  },
+  {
+    "role": "user",
+    "content": "winning possibility kya hai dono team mai se kon jeet sakta hai??"
+  },
+  {
+    "role": "assistant",
+    "content": "अभी के मैच निर्णय के अनुसार, दक्षिण अफ्रीका की जीते की संभावना अधिक है क्योंकि उन्होंने 188 रन का एक मजबूत लक्ष्य सेट किया है। अफगानिस्तान को जीतने के लिए तेज गति से रन बनाने होंगे, खासकर पॉवरप्ले में बिना विकेट गँवाए। अगर अफगानिस्तान शुरुआती ओवरों में अपनी पारी अच्छी तरह से बनाता है और मजबूत साझेदारियाँ करता है, तो उनकी जीत की संभावना बढ़ सकती है। लेकिन वर्तमान स्थिति में दक्षिण अफ्रीका का पलड़ा भारी है क्योंकि उन्होंने एक अच्छा स्कोर बनाया और उनके गेंदबाजों की शुरुआत अच्छी हुई तो वे जल्दी विकेट ले सकते हैं।"
+  }
+]
