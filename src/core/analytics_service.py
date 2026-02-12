@@ -67,6 +67,59 @@ async def get_player_recent_performance(player_name, series_id=None):
     }
 async def handle_tournament_specialist_logic(analysis, user_query, series_name=None, year=None):
     if not series_name: return None
+    
+    # PRIORITY 1: Check DATABASE for season champion data
+    if year:
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            
+            DB_CONFIG = {
+                "dbname": "cricket_db",
+                "user": "postgres",
+                "password": "1234",
+                "host": "localhost",
+                "port": "5432"
+            }
+            
+            conn = psycopg2.connect(**DB_CONFIG)
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            
+            # Query season_champions table
+            cur.execute("""
+                SELECT 
+                    wt.name as winner_team,
+                    rt.name as runner_up_team,
+                    s.name as season_name,
+                    s.year
+                FROM season_champions sc
+                JOIN teams wt ON sc.winner_team_id = wt.id
+                LEFT JOIN teams rt ON sc.runner_up_team_id = rt.id
+                JOIN seasons s ON sc.season_id = s.id
+                JOIN leagues l ON s.league_id = l.id
+                WHERE (l.name ILIKE %s OR l.code ILIKE %s)
+                  AND s.year = %s
+                LIMIT 1
+            """, (f'%{series_name}%', f'%{series_name}%', str(year)))
+            
+            champion = cur.fetchone()
+            cur.close()
+            conn.close()
+            
+            if champion:
+                logger.info(f"✅ Found champion in DATABASE: {champion['winner_team']} (IPL {year})")
+                return {
+                    "winner_info": {
+                        "winner": champion['winner_team'],
+                        "runner_up": champion['runner_up_team'],
+                        "season": f"{series_name} {year}",
+                        "source": "database"
+                    }
+                }
+        except Exception as e:
+            logger.warning(f"Database champion query failed: {e}")
+    
+    # PRIORITY 2: Fall back to API
     sid = await find_series_smart(series_name, year)
     if not sid: return None
     intent = analysis.get("intent", "").lower()
@@ -82,31 +135,61 @@ async def handle_tournament_specialist_logic(analysis, user_query, series_name=N
             "highest_match_aggregate": s.get("highest_match_aggregate")
         }
     return None
+
+
 async def extract_series_winner(series_id, matches=None):
     if not matches:
         data = await get_series_matches_by_id(series_id)
-        matches = data.get("data", [])
+        # We MUST normalize these so they have 'winner', 'matchEnded', and 'name'
+        raw_matches = data.get("data", [])
+        matches = [_normalize_sportmonks_to_app_format(m) for m in raw_matches]
+    
     if not matches: return None
+    
+    # Filter completed matches
     completed_matches = [m for m in matches if m.get("matchEnded")]
     if not completed_matches: return None
+    
+    # The last match in a multi-stage tournament is usually the Final
     final_match = completed_matches[-1]
-    winner = final_match.get("winner") or final_match.get("matchWinner")
-    points_table = {}
-    for m in matches:
-        t1, t2 = m.get("t1"), m.get("t2")
-        w = m.get("winner")
-        status = m.get("status", "").lower()
-        if "abandoned" in status or "no result" in status:
-            if t1: points_table[t1] = points_table.get(t1, 0) + 1
-            if t2: points_table[t2] = points_table.get(t2, 0) + 1
-        elif w:
-            points_table[w] = points_table.get(w, 0) + 2
-    sorted_pts = sorted(points_table.items(), key=lambda x: x[1], reverse=True)
+    
+    # Try to find winner name
+    winner_name = "Unknown"
+    winner_id = final_match.get("winner_team_id")
+    
+    if winner_id:
+        if winner_id == final_match.get("t1_id"):
+             winner_name = final_match.get("t1")
+        elif winner_id == final_match.get("t2_id"):
+             winner_name = final_match.get("t2")
+    
+    # Extract Score Summary
+    scores_list = []
+    scoreboards = final_match.get("scoreboards", [])
+    
+    # Filter for total scoreboards
+    totals = [sb for sb in scoreboards if sb.get("type") == "total"]
+    
+    for sb in totals:
+        tid = sb.get("team_id")
+        runs = sb.get("total")
+        wickets = sb.get("wickets")
+        overs = sb.get("overs")
+        
+        tname = "Unknown"
+        if tid == final_match.get("t1_id"): tname = final_match.get("t1")
+        elif tid == final_match.get("t2_id"): tname = final_match.get("t2")
+        
+        scores_list.append(f"{tname} {runs}/{wickets} ({overs} ov)")
+        
+    final_score_str = ", ".join(scores_list)
+
     return {
-        "winner": winner or "Unknown",
+        "winner": winner_name,
         "final_match": final_match.get("name"),
+        "final_scores": final_score_str,
         "total_matches": len(matches),
-        "points_leaders": sorted_pts[:4]
+        "winner_id": winner_id
     }
 async def get_series_analytics(series_id, deep_scan=True, segment=None, limit=None):
     """
@@ -124,6 +207,7 @@ async def get_series_analytics(series_id, deep_scan=True, segment=None, limit=No
         "most_runs": {},
         "most_wickets": {}
     }
+    
     completed = [m for m in matches if m.get("matchEnded")]
     if limit: completed = completed[:limit]
     analytics["matches_analyzed"] = len(completed)

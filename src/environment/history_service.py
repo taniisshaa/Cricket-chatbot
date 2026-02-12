@@ -12,8 +12,36 @@ logger = get_logger("history_svc_pg", "PAST_HISTORY_PG.log")
 
 def get_history_conn():
     conn = psycopg2.connect(**DB_CONFIG)
-    # Return RealDictCursor factory to interact like sqlite3.Row (dict access)
     return conn
+
+def _upsert_team(cursor, team):
+    if not team or not team.get('id'): return
+    cursor.execute("""
+        INSERT INTO teams (id, name, code, raw_json)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET name=excluded.name, code=excluded.code, raw_json=excluded.raw_json
+    """, (team['id'], team.get('name'), team.get('code'), json.dumps(team)))
+
+def _upsert_player(cursor, player):
+    if not player or not player.get('id'): return
+    cursor.execute("""
+        INSERT INTO players (id, fullname, dateofbirth, batting_style, bowling_style, country_id, raw_json)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET 
+            fullname=excluded.fullname, dateofbirth=excluded.dateofbirth, 
+            batting_style=excluded.batting_style, bowling_style=excluded.bowling_style,
+            country_id=excluded.country_id, raw_json=excluded.raw_json
+    """, (player['id'], player.get('fullname'), player.get('dateofbirth'), 
+          player.get('batting_style'), player.get('bowling_style'), 
+          player.get('country_id'), json.dumps(player)))
+
+def _upsert_venue(cursor, venue):
+    if not venue or not venue.get('id'): return
+    cursor.execute("""
+        INSERT INTO venues (id, name, city, capacity, raw_json)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET name=excluded.name, city=excluded.city, capacity=excluded.capacity, raw_json=excluded.raw_json
+    """, (venue['id'], venue.get('name'), venue.get('city'), venue.get('capacity'), json.dumps(venue)))
 
 async def execute_smart_query(schema_or_query):
     """
@@ -196,9 +224,10 @@ async def past_db_get_standings(year, series_name=None):
 
 async def sync_recent_finished_matches(days_back=7, season_id=None, start_date_str=None, end_date_str=None):
     """
-    Syncs finished matches from SportMonks into local PostgreSQL DB.
+    Syncs ONLY FINISHED matches from SportMonks into local PostgreSQL DB.
+    Scheduled/Upcoming matches are NOT stored.
     """
-    logger.info(f"Starting PG Data Sync (Days={days_back}, Season={season_id})...")
+    logger.info(f"🔄 Starting Smart Sync (Days={days_back}, Season={season_id})...")
     conn = get_history_conn()
     
     try:
@@ -214,11 +243,18 @@ async def sync_recent_finished_matches(days_back=7, season_id=None, start_date_s
 
         res = await sportmonks_cric("/fixtures", params, use_cache=False)
         if not res.get("ok"):
-            logger.error(f"Sync Failed: {res.get('error')}")
+            logger.error(f"❌ Sync Failed: {res.get('error')}")
             return {"status": "error", "message": res.get("error")}
 
-        fixtures = res.get("data", [])
-        logger.info(f"Fetched {len(fixtures)} matches to sync.")
+        all_fixtures = res.get("data", [])
+        logger.info(f"📥 Fetched {len(all_fixtures)} total matches from API")
+        
+        # FILTER: Only process FINISHED matches
+        finished_statuses = ["Finished", "Completed", "FINISHED", "COMPLETED"]
+        fixtures = [f for f in all_fixtures if f.get("status") in finished_statuses or "won" in str(f.get("note", "")).lower()]
+        
+        skipped = len(all_fixtures) - len(fixtures)
+        logger.info(f"✅ Processing {len(fixtures)} FINISHED matches (Skipped {skipped} scheduled/in-progress)")
         
         count = 0
         with conn.cursor() as cursor:
@@ -226,51 +262,72 @@ async def sync_recent_finished_matches(days_back=7, season_id=None, start_date_s
                 try:
                     f_id = f.get("id")
                     s_id = f.get("season_id")
-                    local = f.get("localteam", {}).get("name") or "Team A"
-                    visitor = f.get("visitorteam", {}).get("name") or "Team B"
+                    local_team = f.get("localteam") or {}
+                    visitor_team = f.get("visitorteam") or {}
+                    local = local_team.get("name") or "Team A"
+                    visitor = visitor_team.get("name") or "Team B"
                     name = f"{local} vs {visitor}"
                     start_at = f.get("starting_at")
                     status = f.get("status")
                     venue_id = f.get("venue_id")
                     winner_id = f.get("winner_team_id")
+                    toss_id = f.get("toss_won_team_id")
+                    mom_id = f.get("manofmatch", {}).get("id") if f.get("manofmatch") else None
                     
+                    # 1. Upsert Entities
+                    _upsert_team(cursor, local_team)
+                    _upsert_team(cursor, visitor_team)
+                    _upsert_venue(cursor, f.get("venue"))
+                    
+                    # 2. Upsert Players from match details
+                    for b in f.get("batting", []):
+                        if b.get("batsman"): _upsert_player(cursor, b["batsman"])
+                    for b in f.get("bowling", []):
+                        if b.get("bowler"): _upsert_player(cursor, b["bowler"])
+                    if f.get("manofmatch"):
+                        _upsert_player(cursor, f["manofmatch"])
+
+                    # 3. Build Raw JSON
                     raw_data = {
                         "batting": f.get("batting", []),
                         "bowling": f.get("bowling", []),
                         "scoreboards": f.get("scoreboards", []),
                         "manofmatch": f.get("manofmatch", {}),
-                        "toss_won_team_id": f.get("toss_won_team_id"),
+                        "toss_won_team_id": toss_id,
                         "winner_team_id": winner_id,
-                        "localteam": f.get("localteam"),
-                        "visitorteam": f.get("visitorteam"),
+                        "localteam": local_team,
+                        "visitorteam": visitor_team,
                         "venue": f.get("venue"),
-                        "runs": f.get("runs", [])
+                        "runs": f.get("runs", []),
+                        "note": f.get("note", "")
                     }
-                    
-                    # Convert dict to JSON string for Postgres JSONB
                     raw_json_str = json.dumps(raw_data)
                     
+                    # 4. Insert/Update Fixture (ONLY FINISHED)
                     cursor.execute("""
-                        INSERT INTO fixtures (id, season_id, name, starting_at, status, venue_id, winner_team_id, raw_json)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        INSERT INTO fixtures (id, season_id, name, starting_at, status, venue_id, winner_team_id, toss_won_team_id, man_of_match_id, raw_json)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT(id) DO UPDATE SET 
                             status=excluded.status, 
                             winner_team_id=excluded.winner_team_id,
+                            toss_won_team_id=excluded.toss_won_team_id,
+                            man_of_match_id=excluded.man_of_match_id,
                             raw_json=excluded.raw_json,
                             starting_at=excluded.starting_at,
-                            name=excluded.name
-                    """, (f_id, s_id, name, start_at, status, venue_id, winner_id, raw_json_str))
+                            name=excluded.name,
+                            venue_id=excluded.venue_id
+                    """, (f_id, s_id, name, start_at, status, venue_id, winner_id, toss_id, mom_id, raw_json_str))
                     
                     count += 1
                 except Exception as e:
-                    logger.error(f"Error syncing match {f.get('id')}: {e}")
+                    logger.error(f"❌ Error syncing match {f.get('id')}: {e}")
             
             conn.commit()
     finally:
         conn.close()
     
-    logger.info(f"Sync Complete. Updated {count} matches.")
-    return {"status": "success", "updated": count}
+    logger.info(f"✅ Sync Complete. Stored {count} FINISHED matches (Skipped {skipped} scheduled)")
+    return {"status": "success", "updated": count, "skipped": skipped}
 
 async def sync_specific_match(match_id):
     """
@@ -293,39 +350,60 @@ async def sync_specific_match(match_id):
         with conn.cursor() as cursor:
             f_id = f.get("id")
             s_id = f.get("season_id")
-            local = f.get("localteam", {}).get("name") or "Team A"
-            visitor = f.get("visitorteam", {}).get("name") or "Team B"
+            local_team = f.get("localteam") or {}
+            visitor_team = f.get("visitorteam") or {}
+            local = local_team.get("name") or "Team A"
+            visitor = visitor_team.get("name") or "Team B"
             name = f"{local} vs {visitor}"
             start_at = f.get("starting_at")
             status = f.get("status")
             venue_id = f.get("venue_id")
             winner_id = f.get("winner_team_id")
+            toss_id = f.get("toss_won_team_id")
+            mom_id = f.get("manofmatch", {}).get("id") if f.get("manofmatch") else None
             
+            # 1. Upsert Entities
+            _upsert_team(cursor, local_team)
+            _upsert_team(cursor, visitor_team)
+            _upsert_venue(cursor, f.get("venue"))
+            
+            for b in f.get("batting", []):
+                if b.get("batsman"): _upsert_player(cursor, b["batsman"])
+            for b in f.get("bowling", []):
+                if b.get("bowler"): _upsert_player(cursor, b["bowler"])
+            if f.get("manofmatch"):
+                _upsert_player(cursor, f["manofmatch"])
+
+            # 2. Build Raw JSON
             raw_data = {
                 "batting": f.get("batting", []),
                 "bowling": f.get("bowling", []),
                 "scoreboards": f.get("scoreboards", []),
                 "manofmatch": f.get("manofmatch", {}),
-                "toss_won_team_id": f.get("toss_won_team_id"),
+                "toss_won_team_id": toss_id,
                 "winner_team_id": winner_id,
-                "localteam": f.get("localteam"),
-                "visitorteam": f.get("visitorteam"),
+                "localteam": local_team,
+                "visitorteam": visitor_team,
                 "venue": f.get("venue"),
                 "runs": f.get("runs", [])
             }
             
+            # 3. Insert Fixture
             cursor.execute("""
-                INSERT INTO fixtures (id, season_id, name, starting_at, status, venue_id, winner_team_id, raw_json)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO fixtures (id, season_id, name, starting_at, status, venue_id, winner_team_id, toss_won_team_id, man_of_match_id, raw_json)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(id) DO UPDATE SET 
                     status=excluded.status, 
                     winner_team_id=excluded.winner_team_id,
+                    toss_won_team_id=excluded.toss_won_team_id,
+                    man_of_match_id=excluded.man_of_match_id,
                     raw_json=excluded.raw_json,
                     starting_at=excluded.starting_at,
-                    name=excluded.name
-            """, (f_id, s_id, name, start_at, status, venue_id, winner_id, json.dumps(raw_data)))
+                    name=excluded.name,
+                    venue_id=excluded.venue_id
+            """, (f_id, s_id, name, start_at, status, venue_id, winner_id, toss_id, mom_id, json.dumps(raw_data)))
             conn.commit()
-            logger.info(f"✅ FAST SYNC SUCCESS: Match {match_id} is now in PostgreSQL.")
+            logger.info(f"✅ FAST SYNC SUCCESS: Match {match_id} is now in PostgreSQL with full parameters.")
             return {"status": "success", "match": name}
     except Exception as e:
         logger.error(f"Fast Sync Failed for {match_id}: {e}")

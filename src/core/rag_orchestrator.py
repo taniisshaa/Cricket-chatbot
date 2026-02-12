@@ -102,12 +102,25 @@ class RAGOrchestrator:
                 target_date = datetime.now().strftime("%Y-%m-%d")
                 logger.info(f"📅 Resolved 'today' to {target_date}")
         
+        # Deterministic Winner/Champion Check
+        q_low = query.lower()
+        if ("won" in q_low or "winner" in q_low or "champion" in q_low or "final" in q_low or "score" in q_low or "result" in q_low) and series_name and year:
+            logger.info(f"🏆 FORCE SEASON DATA RETRIEVAL for winner query: {query}")
+            season_data = await self.retriever.retrieve_season_data(series_name, year)
+            if "error" not in season_data:
+                context = self.context_builder.build_season_context(season_data, query)
+                return {
+                    "status": "success",
+                    "data_type": "season",
+                    "data_count": 1 if season_data.get("champion") else 0,
+                    "context": context,
+                    "raw_data": [season_data],
+                    "metadata": {"retrieval_method": "structured_season_lookup"}
+                }
+
         # Retrieve matches
         if target_date:
             matches = await self.retriever.retrieve_match_by_date(target_date, team_name)
-        elif series_name and year:
-            # Use universal engine for complex season queries
-            return await self._handle_universal_query(query, entities)
         else:
             # Fallback to universal engine
             return await self._handle_universal_query(query, entities)
@@ -290,14 +303,27 @@ class RAGOrchestrator:
                 "raw_data": result.get("data", []),
                 "metadata": {
                     "retrieval_method": "universal_sql_engine",
-                    "sql_status": result.get("query_status")
+                    "sql_status": "success"
+                }
+            }
+        elif result.get("query_status") == "no_data":
+            logger.info("⚠️ Universal engine returned NO DATA")
+            return {
+                "status": "success",
+                "data_type": "universal",
+                "data_count": 0,
+                "context": "⚠️ [QUERY_STATUS]: no_data. The database returned no records for this specific query. Consider if the event is too recent or outside the covered period.",
+                "raw_data": [],
+                "metadata": {
+                    "retrieval_method": "universal_sql_engine",
+                    "sql_status": "no_data"
                 }
             }
         else:
             return {
                 "status": "error",
                 "error": result.get("message", "Unknown error"),
-                "context": f"❌ Could not retrieve data: {result.get('message', 'Unknown error')}"
+                "context": f"❌ [QUERY_STATUS]: error. Could not retrieve data: {result.get('message', 'Unknown error')}"
             }
     
     async def verify_retrieval(self, query: str, retrieved_data: Dict) -> bool:

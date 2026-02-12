@@ -29,28 +29,53 @@ async def resolve_season_for_league(league_id, target_year):
     if not res.get("data"): return None
     seasons = res["data"].get("seasons", [])
     target_str = str(target_year)
+    # logger.info(f"Resolving Season for League {league_id} Year {target_year}. Seasons: {len(seasons)}")
     for s in seasons:
-        if s.get("name") == target_str: return s.get("id")
+        if str(s.get("name")) == target_str: return s.get("id")
     for s in seasons:
-        if target_str in s.get("name", ""): return s.get("id")
+        if target_str in str(s.get("name", "")): return s.get("id")
     return None
 async def find_series_smart(series_name, year=None):
     if not series_name: return None
     logger.info(f"Smart Search: {series_name} | Year: {year}")
+    
+    # Extract year from name if not provided
+    if not year:
+        year_match = re.search(r'\b(20\d{2})\b', series_name)
+        if year_match:
+            year = year_match.group(1)
+    
     clean_series = _normalize(series_name)
+    # Remove year from search string to find the league
+    league_search = re.sub(r'\b20\d{2}\b', '', clean_series).strip() or clean_series
+    
     year_str = str(year) if year else ""
+    
+    # 1. Try finding by year directly (returns seasons)
     if year_str:
         y_res = await getSeries(year_str, rows=50)
         if y_res.get("data"):
-            candidates = [s for s in y_res["data"] if _match_series_name(clean_series, s.get("name"))]
-            if candidates: return candidates[0]["id"]
-    res = await getSeries(clean_series, rows=20)
+            candidates = [s for s in y_res["data"] if _match_series_name(league_search, s.get("name"))]
+            if candidates: 
+                # If there are multiple, prefer the ones with exactly the year or the league name
+                return candidates[0]["id"]
+    
+    # 2. Try finding league first
+    res = await getSeries(league_search, rows=20)
     candidates = res.get("data", [])
+    if not candidates:
+        # Fallback to full name search
+        res = await getSeries(clean_series, rows=20)
+        candidates = res.get("data", [])
+        
     if not candidates: return None
+    
     best = candidates[0]
+    # If we have a year, always resolve to season
     if year_str:
         season_id = await resolve_season_for_league(best["id"], year_str)
         if season_id: return season_id
+        
     return best["id"]
 async def find_match_id(team1=None, team2=None, series_id=None, target_date=None, series_name=None, year=None):
     """Logic-driven match finder."""

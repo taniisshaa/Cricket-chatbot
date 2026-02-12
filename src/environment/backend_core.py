@@ -72,12 +72,115 @@ async def sportmonks_cric(endpoint, params=None, use_cache=True, ttl=60, **kwarg
         return {"ok": False, "status": 0, "error": str(e)}
     except Exception as e:
         return {"ok": False, "status": 0, "error": str(e)}
+
 async def getSeries(search=None, **kwargs):
     params = {"search": search} if search else {}
     return await sportmonks_cric("/leagues", params, **kwargs)
+async def _fetch_fixtures_from_db(season_id):
+    try:
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        DB_CONFIG = {
+            "dbname": "cricket_db",
+            "user": "postgres",
+            "password": "1234",
+            "host": "localhost",
+            "port": "5432"
+        }
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # 1. Fetch Fixtures (No Join on team IDs as columns might be missing)
+        cur.execute("""
+            SELECT 
+                f.raw_json, 
+                f.status, f.winner_team_id, f.name, f.starting_at
+            FROM fixtures f
+            WHERE f.season_id = %s
+            ORDER BY f.starting_at DESC
+        """, (str(season_id),))
+        
+        rows = cur.fetchall()
+        
+        if not rows:
+            cur.close()
+            conn.close()
+            return None
+            
+        # 2. Collect Team IDs
+        team_ids = set()
+        matches = []
+        for r in rows:
+            data = r.get("raw_json")
+            if isinstance(data, str):
+                try: data = json.loads(data)
+                except: data = {}
+            if not data: data = {}
+            
+            # Enrich basic
+            data['id'] = data.get('id') or r.get('id')
+            data['status'] = r['status']
+            data['winner_team_id'] = r['winner_team_id']
+            data['name'] = r['name']
+            data['starting_at'] = str(r['starting_at']).replace(" ", "T")
+            
+            # Find team IDs
+            tid1 = data.get('localteam_id')
+            tid2 = data.get('visitorteam_id')
+            
+            # Fallback: check runs/scoreboards if ids missing
+            if not tid1 or not tid2:
+                 # Try to deduce from runs?
+                 pass
+            
+            if tid1: team_ids.add(tid1)
+            if tid2: team_ids.add(tid2)
+            
+            matches.append(data)
+
+        # 3. Fetch Team Names
+        team_map = {}
+        if team_ids:
+            cur.execute("SELECT id, name, code FROM teams WHERE id IN %s", (tuple(team_ids),))
+            t_rows = cur.fetchall()
+            for tr in t_rows:
+                team_map[tr['id']] = {"id": tr['id'], "name": tr['name'], "code": tr['code']}
+        
+        cur.close()
+        conn.close()
+        
+        # 4. Enrich Matches
+        results = []
+        for m in matches:
+            lid = m.get('localteam_id')
+            vid = m.get('visitorteam_id')
+            
+            if lid and lid in team_map:
+                m['localteam'] = team_map[lid]
+            if vid and vid in team_map:
+                m['visitorteam'] = team_map[vid]
+                
+            results.append(m)
+            
+        return results
+    except Exception as e:
+        logger.error(f"DB Fetch Error for Season {season_id}: {e}")
+        return None
+
 async def getSeriesInfo(series_id, includes=None, **kwargs):
+    # Try DB first for fixtures
+    db_matches = await _fetch_fixtures_from_db(series_id)
+    
     info = await sportmonks_cric(f"/seasons/{series_id}", {}, **kwargs)
     if not info.get("data"): info = await sportmonks_cric(f"/leagues/{series_id}", {}, **kwargs)
+    
+    if db_matches:
+        logger.info(f"Using DB Matches for Season {series_id} (Count: {len(db_matches)})")
+        return {
+            "ok": True,
+            "data": {"info": info.get("data"), "matchList": db_matches}
+        }
+    
     params = {"include": f"localteam,visitorteam,venue,{includes}" if includes else "localteam,visitorteam,venue"}
     sid = info.get("data", {}).get("season_id") or info.get("data", {}).get("current_season_id")
     if sid: params["filter[season_id]"] = sid
@@ -127,9 +230,10 @@ async def getTodayMatches(**kwargs):
     from src.core.current_season_service import get_todays_matches_full
     return await get_todays_matches_full()
 async def get_live_matches(**kwargs): return await getCurrentMatches(**kwargs)
+
 async def get_series_matches_by_id(series_id, **kwargs):
     res = await getSeriesInfo(series_id, **kwargs)
-    return {"data": res.get("data", {}).get("matchList", [])}
+    return {"data": res.get("data", {}).get("matchList", []), "info": res.get("data", {})}
 def _normalize_status(status):
     s = str(status or "").upper()
     mapping = {
@@ -191,8 +295,10 @@ def _normalize_sportmonks_to_app_format(sm_match):
         "date": sm_match.get("starting_at", "").split("T")[0],
         "venue": (sm_match.get("venue") or {}).get("name"),
         "t1": local, "t2": visitor,
+        "t1_id": (sm_match.get("localteam") or {}).get("id"),
+        "t2_id": (sm_match.get("visitorteam") or {}).get("id"),
+        "winner_team_id": sm_match.get("winner_team_id"),
         "matchEnded": status in ["Finished", "Completed", "Abandoned"],
-        "scoreboards": sm_match.get("scoreboards", []),
         "scoreboards": sm_match.get("scoreboards", []),
         "man_of_match": mom_data,
         "top_performers": best_players,

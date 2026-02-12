@@ -1,6 +1,11 @@
 import asyncio
 import json
 import streamlit as st
+# Support for standalone testing
+if not hasattr(st, "session_state"):
+    class MockSessionState(dict):
+        def __getattr__(self, key): return self.get(key, {})
+    st.session_state = MockSessionState()
 from datetime import datetime
 from src.utils.utils_core import get_logger
 from src.agents.ai_core import analyze_intent, run_reasoning_agent, generate_human_response, predict, predict_live_match
@@ -27,6 +32,11 @@ from src.environment.live_match_service import (
 
 from src.core.rag_orchestrator import execute_rag_pipeline
 def update_context(series=None, year=None, team=None, player=None, opponent=None):
+    try:
+        if "chat_context" not in st.session_state:
+            return
+    except:
+        return # Not running in Streamlit
     if series: st.session_state.chat_context["last_series"] = series
     if year: st.session_state.chat_context["last_year"] = year
     if team: st.session_state.chat_context["last_team"] = team
@@ -209,14 +219,20 @@ async def process_user_message(user_query, conversation_history=None):
             ctx_logger.info(f"✅ RAG Success: Retrieved {rag_result.get('data_type')} data ({rag_result.get('data_count')} records)")
             
             # Store the main context evidence for the LLM
+            # Store the main context evidence for the LLM
             if "rag_evidence" not in api_results:
                  api_results["rag_evidence"] = rag_result.get("context")
             
+            # CRITICAL: Populate universal_query_result with status for the Research Agent
+            api_results["universal_query_result"] = {
+                "query_status": "success",
+                "data": rag_result.get("raw_data"),
+                "count": rag_result.get("data_count"),
+                "data_type": rag_result.get("data_type")
+            }
+            
             # Use raw data to populate specific fields if needed
-            if rag_result.get("data_type") == "universal":
-                api_results["universal_query_result"] = {"data": rag_result.get("raw_data")}
-            elif rag_result.get("data_type") == "match":
-                # If specifically match data, populate historical_match_focus for deep dives
+            if rag_result.get("data_type") == "match":
                 if rag_result.get("raw_data") and len(rag_result.get("raw_data")) > 0:
                      api_results["historical_match_focus"] = {
                          "match_info": rag_result.get("raw_data")[0],

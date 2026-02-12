@@ -222,14 +222,16 @@ class SmartRetriever:
         """
         logger.info(f"🏆 Retrieving season data: {season_name} {year}")
         
-        # Get season ID
+        # Get season ID by joined name/code and year
         season_sql = """
-        SELECT id, name, year
-        FROM seasons
-        WHERE name ILIKE %s AND year = %s
+        SELECT s.id, s.name, s.year, l.name as league_name
+        FROM seasons s
+        JOIN leagues l ON s.league_id = l.id
+        WHERE (l.name ILIKE %s OR l.code ILIKE %s OR s.name ILIKE %s)
+          AND s.year = %s
         LIMIT 1
         """
-        season_data = self._execute_query(season_sql, (f"%{season_name}%", str(year)))
+        season_data = self._execute_query(season_sql, (f"%{season_name}%", f"%{season_name}%", f"%{season_name}%", str(year)))
         
         if not season_data:
             logger.warning(f"❌ Season not found: {season_name} {year}")
@@ -240,9 +242,14 @@ class SmartRetriever:
         
         # Get champion
         champion_sql = """
-        SELECT t.name as winner_team, sc.runner_up_team_id
+        SELECT 
+            wt.name as winner_team, 
+            rt.name as runner_up_team,
+            sc.winner_team_id,
+            sc.runner_up_team_id
         FROM season_champions sc
-        JOIN teams t ON sc.winner_team_id = t.id
+        JOIN teams wt ON sc.winner_team_id = wt.id
+        LEFT JOIN teams rt ON sc.runner_up_team_id = rt.id
         WHERE sc.season_id = %s
         """
         champion = self._execute_query(champion_sql, (season_id,))
@@ -251,8 +258,9 @@ class SmartRetriever:
         awards_sql = """
         SELECT 
             sa.award_type,
-            p.fullname as player_name,
-            sa.value
+            COALESCE(p.fullname, sa.player_name) as player_name,
+            sa.team_name,
+            sa.stats as value
         FROM season_awards sa
         LEFT JOIN players p ON sa.player_id = p.id
         WHERE sa.season_id = %s
@@ -260,6 +268,7 @@ class SmartRetriever:
         awards = self._execute_query(awards_sql, (season_id,))
         
         # Get all matches
+        # Get all matches list (lightweight)
         matches_sql = """
         SELECT 
             f.id, f.name, f.starting_at, f.status,
@@ -269,13 +278,45 @@ class SmartRetriever:
         ORDER BY f.starting_at
         """
         matches = self._execute_query(matches_sql, (season_id,))
-        
+        if matches:
+            # Assume the last match is the Final
+            last_match_id = matches[-1]["id"]
+            
+            # Fetch details for the last few matches (Playoffs candidate)
+            # Use filter on IDs to be efficient
+            last_few_ids = [m["id"] for m in matches[-4:]]
+            
+            key_matches_sql = """
+            SELECT 
+                f.id, f.name, f.starting_at, f.status,
+                f.raw_json,
+                f.raw_json->>'note' as result
+            FROM fixtures f
+            WHERE f.id IN %s
+            ORDER BY f.starting_at DESC
+            """
+            raw_key_matches = self._execute_query(key_matches_sql, (tuple(last_few_ids),))
+            key_matches = self._process_match_results(raw_key_matches)
+            
+            # Final is the one with last_match_id
+            final_match = next((m for m in key_matches if m["id"] == last_match_id), None)
+            
+            # If explicit name check helps confirm?
+            # if final_match and "Final" not in final_match.get("name",""):
+            #    # Log warning? But usually position is reliable for completed seasons.
+            #    pass
+        else:
+            key_matches = []
+            final_match = None
+            
         result = {
             "season_info": season,
             "champion": champion[0] if champion else None,
             "awards": awards,
             "total_matches": len(matches),
-            "matches": matches
+            "matches": matches, 
+            "key_matches": key_matches, 
+            "final_match": final_match
         }
         
         logger.info(f"✅ Retrieved season data for {season_name} {year}")
@@ -369,15 +410,12 @@ class SmartRetriever:
     def _process_match_results(self, results: List[Dict]) -> List[Dict]:
         """
         Process raw match results to extract key information from raw_json.
-        
-        Args:
-            results: Raw database results
-        
-        Returns:
-            Processed results with extracted scorecard data
+        Also enriches with Team Names from DB.
         """
         processed = []
+        team_ids_to_fetch = set()
         
+        # First pass: Process structure and collect IDs
         for match in results:
             if "raw_json" in match and match["raw_json"]:
                 raw = match["raw_json"]
@@ -388,12 +426,21 @@ class SmartRetriever:
                     except:
                         raw = {}
                 
-                # Extract key information
+                # Try to get IDs directly from keys if available, else from scoreboards
+                # Usually raw_json has localteam_id, visitorteam_id at top level
+                if raw.get("localteam_id"): team_ids_to_fetch.add(raw.get("localteam_id"))
+                if raw.get("visitorteam_id"): team_ids_to_fetch.add(raw.get("visitorteam_id"))
+                if raw.get("winner_team_id"): team_ids_to_fetch.add(raw.get("winner_team_id"))
+
                 match["innings_summary"] = []
                 for sb in raw.get("scoreboards", []):
                     if sb.get("type") == "total":
+                        tid = sb.get("team_id")
+                        if tid: team_ids_to_fetch.add(tid)
+                        
                         match["innings_summary"].append({
-                            "team_id": sb.get("team_id"),
+                            "team_id": tid,
+                            "team_name": f"Team {tid}", # Placeholder
                             "score": sb.get("total"),
                             "wickets": sb.get("wickets"),
                             "overs": sb.get("overs")
@@ -421,11 +468,41 @@ class SmartRetriever:
                 match["result"] = raw.get("note")
                 match["winner_team_id"] = raw.get("winner_team_id")
                 
-                # Remove the massive raw_json to save context
-                del match["raw_json"]
+                # Save IDs for enrichment
+                match["_local_id"] = raw.get("localteam_id")
+                match["_visitor_id"] = raw.get("visitorteam_id")
+                
+                if "raw_json" in match:
+                     del match["raw_json"]
             
             processed.append(match)
-        
+            
+        # Bulk Fetch Team Names
+        if team_ids_to_fetch:
+            try:
+                ids_tuple = tuple(team_ids_to_fetch)
+                sql = "SELECT id, name FROM teams WHERE id IN %s"
+                team_rows = self._execute_query(sql, (ids_tuple,))
+                team_map = {row["id"]: row["name"] for row in team_rows}
+                
+                # Second pass: Enrich with names
+                for match in processed:
+                    # Enrich innings summary
+                    if "innings_summary" in match:
+                        for inn in match["innings_summary"]:
+                            tid = inn.get("team_id")
+                            if tid in team_map:
+                                inn["team_name"] = team_map[tid]
+                    
+                    # Enrich match name if needed (often match name is already "A vs B" but verification helps)
+                    # We can leave match['name'] as is, it comes from DB 'name' column.
+                    
+                    # Ensure Winner Name if needed?
+                    # The context builder uses winner_team_id for logic, but usually we just show Result string.
+                    pass
+            except Exception as e:
+                logger.error(f"Failed to enrich team names: {e}")
+                
         return processed
 
 # Global instance

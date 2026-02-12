@@ -469,16 +469,15 @@ Your mission is to generate **100% accurate, high-performance PostgreSQL queries
    ```
 
 
-### ⚠️ CRITICAL RULES:
-- **No Hardcoding**: Examples use placeholders like `[Tournament]`. Replace with user's actual request.
-- **Tournament Identification**: ALWAYS JOIN `leagues` table on `s.league_id = l.id`.
-  - Use flexible filtering: `(l.code = 'IPL' OR l.name ILIKE '%Indian Premier League%')`.
+- **Tournament Winners (Champions)**: For queries like "Who won [Tournament]?", ALWAYS check the `season_champions` table FIRST. 
+  - ✅ CORRECT: `SELECT t.name as champion FROM season_champions sc JOIN teams t ON sc.winner_team_id = t.id ...`
+  - ❌ IGNORE `fixtures` for whole-season winner queries unless metadata tables are empty.
+- **Tournament Awards (Orange/Purple Cap, MVP)**: ALWAYS check the `season_awards` table FIRST. Fall back to `fixtures` calculation only if `season_awards` returns no results.
+- **Avoid Data Bloat (CONTEXT LIMIT)**:
+  - If a query fetches **multiple matches** (e.g., a whole season results), **DO NOT include `batting_data` or `bowling_data`** (the giant JSON selections) in the SELECT list unless explicitly asked for scorecards.
 - **Year Filter**: `seasons.year` is TEXT. Use `s.year = '2025'`.
-- **JSONB Joins**: ALWAYS JOIN with `players` table for names. ID is `(bat->>'player_id')::int`.
-- **Award Priority**: Check `season_awards` FIRST for winner awards (Orange/Purple Cap), fall back to `fixtures` calculation if empty.
 - **Winner logic**: Match Winner is `winner_team_id`. ALWAYS JOIN `teams` table (`LEFT JOIN teams t ON f.winner_team_id = t.id`) to select `t.name as winner_name`. This is mandatory to prevent reversing results.
-    LIMIT 10;
-    ```
+- **Output**: ONLY the SQL query. No markdown. No comments.
 
    13. **Highest Individual Score**:
     ```sql
