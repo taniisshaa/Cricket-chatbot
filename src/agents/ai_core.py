@@ -330,7 +330,7 @@ async def generate_human_response(api_results, user_query, analysis, conversatio
     - **INTENT ALIGNMENT**: If intent is UPCOMING, strictly list matches from 'upcoming_schedule' that are marked as 'Upcoming'. Do NOT present 'Live' matches as upcoming.
     - **CRITICAL**: If [OUTPUT_SCRIPT] is DEVANAGARI, you MUST use Devanagari script (Hindi). If [OUTPUT_SCRIPT] is ENGLISH, use English.
     - NEVER use Roman script for Hindi words.
-    - Be concise.
+    - **LENGTH**: Aim for a response length of **150-200 tokens**. Provide detailed context and insights to meet this.
     """})
     
     try:
