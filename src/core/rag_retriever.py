@@ -246,13 +246,18 @@ class SmartRetriever:
             wt.name as winner_team, 
             rt.name as runner_up_team,
             sc.winner_team_id,
-            sc.runner_up_team_id
+            sc.runner_up_team_id,
+            sc.final_match_id
         FROM season_champions sc
         JOIN teams wt ON sc.winner_team_id = wt.id
         LEFT JOIN teams rt ON sc.runner_up_team_id = rt.id
         WHERE sc.season_id = %s
         """
-        champion = self._execute_query(champion_sql, (season_id,))
+        champion_rows = self._execute_query(champion_sql, (season_id,))
+        champion = champion_rows[0] if champion_rows else None
+        
+        # Extract Final Match ID from champions record if exists
+        explicit_final_id = champion.get("final_match_id") if champion else None
         
         # Get awards
         awards_sql = """
@@ -267,7 +272,6 @@ class SmartRetriever:
         """
         awards = self._execute_query(awards_sql, (season_id,))
         
-        # Get all matches
         # Get all matches list (lightweight)
         matches_sql = """
         SELECT 
@@ -275,16 +279,34 @@ class SmartRetriever:
             f.raw_json->>'note' as result
         FROM fixtures f
         WHERE f.season_id = %s
-        ORDER BY f.starting_at
+        ORDER BY f.starting_at ASC
         """
         matches = self._execute_query(matches_sql, (season_id,))
+        
+        key_matches = []
+        final_match = None
+        
         if matches:
-            # Assume the last match is the Final
-            last_match_id = matches[-1]["id"]
+            # Strategy to find Final:
+            # 1. Use explicit_final_id if exists
+            # 2. Look for "Final" in name
+            # 3. Last match by date
             
-            # Fetch details for the last few matches (Playoffs candidate)
-            # Use filter on IDs to be efficient
-            last_few_ids = [m["id"] for m in matches[-4:]]
+            final_candidate_id = explicit_final_id
+            if not final_candidate_id:
+                for m in reversed(matches):
+                    if "Final" in m.get("name", ""):
+                        final_candidate_id = m["id"]
+                        break
+            
+            if not final_candidate_id:
+                if matches:
+                    final_candidate_id = matches[-1]["id"]
+
+            # Fetch details for key matches (recent ones / Playoffs)
+            # We combine the identified final + the last few matches
+            candidate_ids = set([m["id"] for m in matches[-5:]])
+            if final_candidate_id: candidate_ids.add(final_candidate_id)
             
             key_matches_sql = """
             SELECT 
@@ -295,23 +317,21 @@ class SmartRetriever:
             WHERE f.id IN %s
             ORDER BY f.starting_at DESC
             """
-            raw_key_matches = self._execute_query(key_matches_sql, (tuple(last_few_ids),))
-            key_matches = self._process_match_results(raw_key_matches)
+            raw_key_matches = self._execute_query(key_matches_sql, (tuple(candidate_ids),))
+            processed_key_matches = self._process_match_results(raw_key_matches)
+            key_matches = processed_key_matches
             
-            # Final is the one with last_match_id
-            final_match = next((m for m in key_matches if m["id"] == last_match_id), None)
-            
-            # If explicit name check helps confirm?
-            # if final_match and "Final" not in final_match.get("name",""):
-            #    # Log warning? But usually position is reliable for completed seasons.
-            #    pass
+            # Final is either the identified match or the top one in key matches
+            final_match = next((m for m in key_matches if m["id"] == final_candidate_id), None)
+            if not final_match and key_matches:
+                final_match = key_matches[0]
         else:
             key_matches = []
             final_match = None
             
         result = {
             "season_info": season,
-            "champion": champion[0] if champion else None,
+            "champion": champion,
             "awards": awards,
             "total_matches": len(matches),
             "matches": matches, 
@@ -428,9 +448,24 @@ class SmartRetriever:
                 
                 # Try to get IDs directly from keys if available, else from scoreboards
                 # Usually raw_json has localteam_id, visitorteam_id at top level
-                if raw.get("localteam_id"): team_ids_to_fetch.add(raw.get("localteam_id"))
-                if raw.get("visitorteam_id"): team_ids_to_fetch.add(raw.get("visitorteam_id"))
-                if raw.get("winner_team_id"): team_ids_to_fetch.add(raw.get("winner_team_id"))
+                # OR nested objects: raw_json->'localteam'->'id'
+                
+                def get_tid(key_prefix):
+                    # Try flat key first: localteam_id
+                    val = raw.get(f"{key_prefix}_id")
+                    if val: return val
+                    # Try object key: localteam -> id
+                    obj = raw.get(key_prefix)
+                    if isinstance(obj, dict): return obj.get("id")
+                    return None
+
+                lt_id = get_tid("localteam")
+                vt_id = get_tid("visitorteam")
+                wt_id = get_tid("winner_team") or raw.get("winner_team_id")
+                
+                if lt_id: team_ids_to_fetch.add(lt_id)
+                if vt_id: team_ids_to_fetch.add(vt_id)
+                if wt_id: team_ids_to_fetch.add(wt_id)
 
                 match["innings_summary"] = []
                 for sb in raw.get("scoreboards", []):

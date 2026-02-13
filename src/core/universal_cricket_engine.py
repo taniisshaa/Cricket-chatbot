@@ -72,8 +72,13 @@ def _process_raw_json_results(rows):
                 team_name = "Team"
                 local = raw.get("localteam") or {}
                 visitor = raw.get("visitorteam") or {}
-                if t_id == local.get("id"): team_name = local.get("name")
-                elif t_id == visitor.get("id"): team_name = visitor.get("name")
+                
+                # Robust ID extraction matching SQL Logic
+                l_id = local.get("id") or raw.get("localteam_id")
+                v_id = visitor.get("id") or raw.get("visitorteam_id")
+                
+                if t_id == l_id: team_name = local.get("name") or "Local Team"
+                elif t_id == v_id: team_name = visitor.get("name") or "Visitor Team"
                 row["innings_scores"].append(f"{team_name}: {sb.get('total')}/{sb.get('wickets')} in {sb.get('overs')} ov")
 
         row["match_note"] = raw.get("note")
@@ -109,27 +114,95 @@ Your mission is to generate **100% accurate, high-performance PostgreSQL queries
 
 ### 🏆 CORE SQL LOGICS (NO HARDCODING)
 
-1. **Match Result (Winner/Runner-up)**:
+-1. **Team Performance Aggregation (WINS/LOSSES COUNT)**:
    ```sql
-   -- Winner: t_win.name | Runner-up: t_lose.name
-   SELECT f.name as match, t_win.name as winner, t_lose.name as runner_up
-   FROM fixtures f
-   JOIN teams t_win ON f.winner_team_id = t_win.id
-   -- Fallback for runner-up logic: Check local/visitor IDs from JSON
-   JOIN teams t_lose ON (
-       CASE 
-           WHEN f.winner_team_id = COALESCE((f.raw_json->>'localteam_id')::int, (f.raw_json->'localteam'->>'id')::int) 
-           THEN COALESCE((f.raw_json->>'visitorteam_id')::int, (f.raw_json->'visitorteam'->>'id')::int) 
-           ELSE COALESCE((f.raw_json->>'localteam_id')::int, (f.raw_json->'localteam'->>'id')::int) 
-       END
-   ) = t_lose.id
-   JOIN seasons s ON f.season_id = s.id
-   JOIN leagues l ON s.league_id = l.id
-   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') 
-     AND f.name ILIKE '%[TeamA]%' AND f.name ILIKE '%[TeamB]%' AND s.year = '[Year]';
+   -- LOGIC: For queries like "how many wins", "performance", "record"
+   -- Calculate aggregated stats directly in SQL for 100% accuracy
+   WITH team_matches AS (
+     SELECT f.id, f.name, f.winner_team_id,
+            CASE WHEN f.winner_team_id = t.id THEN 1 ELSE 0 END as is_win
+     FROM fixtures f
+     JOIN seasons s ON f.season_id = s.id
+     JOIN leagues l ON s.league_id = l.id
+     JOIN teams t_local ON COALESCE((f.raw_json->'localteam'->>'id')::int, (f.raw_json->>'localteam_id')::int) = t_local.id
+     JOIN teams t_visitor ON COALESCE((f.raw_json->'visitorteam'->>'id')::int, (f.raw_json->>'visitorteam_id')::int) = t_visitor.id
+     CROSS JOIN teams t
+     WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%')
+       AND s.year = '[Year]'
+       AND f.status = 'Finished'
+       AND (t.name ILIKE '%[TeamName]%' OR t.code = '[TeamCode]')
+       AND (t_local.id = t.id OR t_visitor.id = t.id)
+   )
+   SELECT 
+     COUNT(*) as total_matches,
+     SUM(is_win) as wins,
+     COUNT(*) - SUM(is_win) as losses,
+     ROUND(100.0 * SUM(is_win) / COUNT(*), 2) as win_percentage
+   FROM team_matches;
    ```
 
-2. **Tournament Outcomes (Champion/Runner-up)**:
+0. **Latest Match / Season Final Results**:
+   ```sql
+   -- LOGIC: Retrieve the SEASON FINALE or LATEST MATCH with robust score verification.
+   SELECT f.name as match, f.status, f.venue_id, t_win.name as winner_name,
+          t_local.name as local_team_name, t_visitor.name as visitor_team_name,
+          CASE 
+            WHEN (sb_local->>'total')::int > 0 THEN (sb_local->>'total')::int
+            ELSE (SELECT COALESCE(SUM((x->>'score')::int), 0) FROM jsonb_array_elements(f.raw_json->'batting') x WHERE (x->>'team_id')::int = t_local.id)
+          END as local_score_final,
+          CASE 
+            WHEN (sb_visitor->>'total')::int > 0 THEN (sb_visitor->>'total')::int
+            ELSE (SELECT COALESCE(SUM((x->>'score')::int), 0) FROM jsonb_array_elements(f.raw_json->'batting') x WHERE (x->>'team_id')::int = t_visitor.id)
+          END as visitor_score_final,
+          f.raw_json->'scoreboards' as original_summary
+   FROM fixtures f
+   JOIN seasons s ON f.season_id = s.id
+   JOIN leagues l ON s.league_id = l.id
+   LEFT JOIN teams t_win ON f.winner_team_id = t_win.id
+   JOIN teams t_local ON COALESCE((f.raw_json->'localteam'->>'id')::int, (f.raw_json->>'localteam_id')::int) = t_local.id
+   JOIN teams t_visitor ON COALESCE((f.raw_json->'visitorteam'->>'id')::int, (f.raw_json->>'visitorteam_id')::int) = t_visitor.id
+   LEFT JOIN LATERAL jsonb_array_elements(f.raw_json->'scoreboards') sb_local ON (sb_local->>'team_id')::int = t_local.id AND (sb_local->>'type' = 'total')
+   LEFT JOIN LATERAL jsonb_array_elements(f.raw_json->'scoreboards') sb_visitor ON (sb_visitor->>'team_id')::int = t_visitor.id AND (sb_visitor->>'type' = 'total')
+   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%')
+     AND s.year = '[Year]' AND f.status = 'Finished'
+   ORDER BY CASE WHEN f.name ILIKE '%Final%' THEN 0 ELSE 1 END, f.starting_at DESC LIMIT 1;
+   ```
+
+1. **Highest and Lowest Team Totals (RECORDS)**:
+   ```sql
+   -- LOGIC: Use jsonb_array_elements on 'scoreboards' to find team totals.
+   -- MANDATORY: Filter (sb->>'scoreboard') IN ('S1', 'S2') to exclude Super Overs.
+   -- MANDATORY: Filter (sb->>'total')::int > 0 and (sb->>'overs')::float >= 5 to ensure valid innings.
+   SELECT f.name as match, (sb->>'total')::int as total_score, (sb->>'overs')::float as overs, t.name as team,
+          f.winner_team_id,
+          f.raw_json->'scoreboards' as score_summary
+   FROM fixtures f
+   JOIN seasons s ON f.season_id = s.id
+   JOIN leagues l ON s.league_id = l.id
+   CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'scoreboards') AS sb
+   JOIN teams t ON (sb->>'team_id')::int = t.id
+   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') 
+     AND s.year = '[Year]' AND f.status = 'Finished'
+     AND (sb->>'scoreboard') IN ('S1', 'S2')
+     AND (sb->>'total')::int > 0
+   ORDER BY total_score ASC -- Use ASC for lowest, DESC for highest
+   LIMIT 1;
+   ```
+
+2. **Highest Individual Score**:
+   ```sql
+   -- LOGIC: Find the single highest score in an innings.
+   SELECT p.fullname as player, (bat->>'score')::int as score, (bat->>'ball')::int as balls, f.name as match
+   FROM fixtures f
+   JOIN seasons s ON f.season_id = s.id
+   JOIN leagues l ON s.league_id = l.id
+   CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'batting') AS bat
+   JOIN players p ON (bat->>'player_id')::int = p.id
+   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]'
+   ORDER BY score DESC LIMIT 1;
+   ```
+
+3. **Tournament Outcomes (Champion/Runner-up)**:
    ```sql
    -- Champion from season_champions
    SELECT t.name as champion, l.name as tournament, s.year
@@ -139,7 +212,6 @@ Your mission is to generate **100% accurate, high-performance PostgreSQL queries
    JOIN teams t ON sc.winner_team_id = t.id
    WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]';
    
-   -- Runner-up (Derived from final match loser)
    -- Runner-up (Derived from final match loser)
    SELECT t_lose.name AS runner_up
    FROM season_champions sc
@@ -156,30 +228,40 @@ Your mission is to generate **100% accurate, high-performance PostgreSQL queries
    WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]';
    ```
 
+4. **Orange Cap (Most Runs)**:
+   -- LOGIC: Check season_awards FIRST. Fallback to aggregation if empty.
+   SELECT award_type as category, player_name as player, stats as value
+   FROM season_awards sa
+   JOIN seasons s ON sa.season_id = s.id
+   JOIN leagues l ON s.league_id = l.id
+   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]'
+     AND sa.award_type ILIKE '%Orange Cap%'
+   UNION ALL
+   SELECT 'Calculated Orange Cap' as category, p.fullname AS player, SUM((bat->>'score')::int)::text AS value
+   FROM fixtures f
+   JOIN seasons s ON f.season_id = s.id
+   JOIN leagues l ON s.league_id = l.id
+   CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'batting') AS bat
+   JOIN players p ON (bat->>'player_id')::int = p.id
+   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]'
+     AND NOT EXISTS (SELECT 1 FROM season_awards sa2 JOIN seasons s2 ON sa2.season_id = s2.id WHERE s2.year = '[Year]' AND sa2.award_type ILIKE '%Orange Cap%')
+   GROUP BY p.fullname ORDER BY value DESC LIMIT 1;
+   ```
 
-6. **Detailed Match Analysis (Batting/Bowling)**:
+5. **Detailed Match Analysis (Batting/Bowling)**:
    ```sql
-   -- LOGIC: Retrieve ENRICHED match details with PLAYER NAMES.
-   -- Replaces raw IDs with Full Names via LATERAL JOINs.
+   -- Use for "Scorecard", "Match Details", "Who scored runs in match X".
    SELECT f.name as match, f.status, f.venue_id, t.name as winner_name,
-          (
-            SELECT jsonb_agg(jsonb_build_object('player', COALESCE(p.fullname, 'Unknown'), 'runs', (x->>'score')::int, 'balls', (x->>'ball')::int, '4s', (x->>'four_x')::int, '6s', (x->>'six_x')::int, 'sr', (x->>'rate')::float))
-            FROM jsonb_array_elements(f.raw_json->'batting') x
-            LEFT JOIN players p ON (x->>'player_id')::int = p.id
-          ) as batting_data,
-          (
-            SELECT jsonb_agg(jsonb_build_object('player', COALESCE(p.fullname, 'Unknown'), 'o', (x->>'overs')::float, 'r', (x->>'runs')::int, 'w', (x->>'wickets')::int, 'eco', (x->>'rate')::float))
-            FROM jsonb_array_elements(f.raw_json->'bowling') x
-            LEFT JOIN players p ON (x->>'player_id')::int = p.id
-          ) as bowling_data,
+          (SELECT jsonb_agg(jsonb_build_object('player', COALESCE(p.fullname, 'Unknown'), 'runs', (x->>'score')::int, 'balls', (x->>'ball')::int, 'sr', (x->>'rate')::float))
+           FROM jsonb_array_elements(f.raw_json->'batting') x LEFT JOIN players p ON (x->>'player_id')::int = p.id) as batting_data,
           f.raw_json->'scoreboards' as score_summary
    FROM fixtures f
-   JOIN season_champions sc ON f.id = sc.final_match_id
-   JOIN seasons s ON sc.season_id = s.id
+   JOIN seasons s ON f.season_id = s.id
    JOIN leagues l ON s.league_id = l.id
    LEFT JOIN teams t ON f.winner_team_id = t.id
    WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%')
-     AND s.year = '[Year]';
+     AND s.year = '[Year]' AND (f.name ILIKE '%[TeamA]%' OR f.name ILIKE '%[TeamB]%')
+   ORDER BY f.starting_at DESC LIMIT 1;
    ```
 
    -- Alternative for non-final matches:
@@ -212,19 +294,15 @@ Your mission is to generate **100% accurate, high-performance PostgreSQL queries
     -- Essential for "Journey", "Performance", "Road to Final" queries.
     -- IMPORTANT: For RCB (Royal Challengers Bangalore/Bengaluru), check BOTH names or use code 'RCB' via JOIN.
     SELECT f.name as match, f.status, f.venue_id, t_win.name as winner_name,
-           (
-             SELECT jsonb_agg(jsonb_build_object('player', COALESCE(p.fullname, 'Unknown'), 'runs', (x->>'score')::int, 'balls', (x->>'ball')::int, 'sr', (x->>'rate')::float))
-             FROM jsonb_array_elements(f.raw_json->'batting') x
-             LEFT JOIN players p ON (x->>'player_id')::int = p.id
-           ) as batting_data,
+           -- Removed batting_data for journey queries to preserve context
            f.raw_json->'scoreboards' as score_summary
     FROM fixtures f
     JOIN seasons s ON f.season_id = s.id
     JOIN leagues l ON s.league_id = l.id
     LEFT JOIN teams t_win ON f.winner_team_id = t_win.id
     -- Strict Team Filter via JOIN
-    JOIN teams t_local ON (f.raw_json->'localteam'->>'id')::int = t_local.id
-    JOIN teams t_visitor ON (f.raw_json->'visitorteam'->>'id')::int = t_visitor.id
+    JOIN teams t_local ON COALESCE((f.raw_json->'localteam'->>'id')::int, (f.raw_json->>'localteam_id')::int) = t_local.id
+    JOIN teams t_visitor ON COALESCE((f.raw_json->'visitorteam'->>'id')::int, (f.raw_json->>'visitorteam_id')::int) = t_visitor.id
     WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%')
       AND s.year = '[Year]'
       AND (
@@ -340,28 +418,6 @@ Your mission is to generate **100% accurate, high-performance PostgreSQL queries
     LIMIT [Limit]; -- Set to 2 for "Top 2 teams", 10 for full table
     ```
 
-7. **Orange Cap (Most Runs)**:
-   -- LOGIC: Check season_awards FIRST (Use ILIKE for fuzzy match). Fallback to aggregation if empty using UNION ALL.
-   SELECT award_type as category, player_name as player, stats as value
-   FROM season_awards sa
-   JOIN seasons s ON sa.season_id = s.id
-   JOIN leagues l ON s.league_id = l.id
-   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]'
-     AND sa.award_type ILIKE '%Orange Cap%'
-   UNION ALL
-   SELECT 'Calculated Orange Cap' as category, p.fullname AS player, SUM((bat->>'score')::int)::text AS value
-   FROM fixtures f
-   JOIN seasons s ON f.season_id = s.id
-   JOIN leagues l ON s.league_id = l.id
-   CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'batting') AS bat
-   JOIN players p ON (bat->>'player_id')::int = p.id
-   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]'
-     AND NOT EXISTS (SELECT 1 FROM season_awards sa2 JOIN seasons s2 ON sa2.season_id = s2.id WHERE s2.year = '[Year]' AND sa2.award_type ILIKE '%Orange Cap%')
-   GROUP BY p.fullname 
-   ORDER BY value DESC 
-   LIMIT 1;
-   ```
-
 8. **Purple Cap (Most Wickets)**:
    -- LOGIC: Check season_awards FIRST (Use ILIKE for fuzzy match). Fallback to aggregation if empty.
    SELECT award_type as category, player_name as player, stats as value
@@ -467,7 +523,27 @@ Your mission is to generate **100% accurate, high-performance PostgreSQL queries
    ORDER BY total_score ASC  -- Use ASC for lowest, DESC for highest
    LIMIT 5;
    ```
+### 🎯 CRITICAL RELEVANCE RULES
 
+**PERFORMANCE QUERY DETECTION** (HIGH PRIORITY):
+- If query contains: "how many wins", "how many matches", "win-loss", "performance", "record", "total wins", "total matches"
+- AND mentions a specific team name
+- THEN use Template -1 (Team Performance Aggregation)
+- This returns pre-calculated stats: total_matches, wins, losses, win_percentage
+- **DO NOT** use Template 16 (Team Season Journey) for counting queries
+- Template 16 is ONLY for "show all matches", "journey", "road to final"
+
+**HIGHEST/LOWEST QUERIES**:
+- MUST use `ORDER BY ... ASC/DESC LIMIT 1`. Never return averages when a specific "highest/lowest" is asked.
+
+**YEAR FILTER**: 
+- Always use `s.year = '[RequestedYear]'`.
+
+**TOURNAMENT PLACEHOLDERS**: 
+- Replace `[TournamentCode]` with `IPL` if query mentions IPL.
+
+**OUTPUT**: 
+- Provide ONLY the SQL query. No explanation. No markdown.
 
 - **Tournament Winners (Champions)**: For queries like "Who won [Tournament]?", ALWAYS check the `season_champions` table FIRST. 
   - ✅ CORRECT: `SELECT t.name as champion FROM season_champions sc JOIN teams t ON sc.winner_team_id = t.id ...`
@@ -475,7 +551,7 @@ Your mission is to generate **100% accurate, high-performance PostgreSQL queries
 - **Tournament Awards (Orange/Purple Cap, MVP)**: ALWAYS check the `season_awards` table FIRST. Fall back to `fixtures` calculation only if `season_awards` returns no results.
 - **Avoid Data Bloat (CONTEXT LIMIT)**:
   - If a query fetches **multiple matches** (e.g., a whole season results), **DO NOT include `batting_data` or `bowling_data`** (the giant JSON selections) in the SELECT list unless explicitly asked for scorecards.
-- **Year Filter**: `seasons.year` is TEXT. Use `s.year = '2025'`.
+- **Year Filter**: `seasons.year` is TEXT. Use `s.year = '2025'``.
 - **Winner logic**: Match Winner is `winner_team_id`. ALWAYS JOIN `teams` table (`LEFT JOIN teams t ON f.winner_team_id = t.id`) to select `t.name as winner_name`. This is mandatory to prevent reversing results.
 - **Output**: ONLY the SQL query. No markdown. No comments.
 
@@ -524,6 +600,12 @@ Your mission is to generate **100% accurate, high-performance PostgreSQL queries
     GROUP BY s.year
     ORDER BY s.year;
     ```
+### 🎯 CRITICAL RELEVANCE RULES
+- **Highest/Record Queries**: MUST use `ORDER BY ... DESC LIMIT 1`. Never return averages when a specific "highest" is asked.
+- **Year Filter**: Always use `s.year = '[RequestedYear]'`.
+- **Tournament placeholders**: Replace `[TournamentCode]` with `IPL` if query mentions IPL.
+- **Output**: Provide ONLY the SQL query. No explanation.
+
 """
 
 class UniversalCricketEngine:
@@ -546,22 +628,29 @@ class UniversalCricketEngine:
         # Clean up Markdown if present
         sql = sql.replace("```sql", "").replace("```", "").strip()
         
-        
-        # GUARDRAIL: Prevent 'scorecard' key hallucination (with variations)
-        # We replace the specific selection with a broader one that we can process
+        # GUARDRAIL: Prevent 'scorecard' key hallucination
         if "scorecard" in sql.lower():
             logger.info("🛡️ GUARDRAIL: Scorecard hallucination detected in SQL. Correcting...")
-            # Replace arrow access variants
             for arrow in ["->'scorecard'", "-> 'scorecard'", "-> \"scorecard\"", "->\"scorecard\""]:
                 if arrow in sql:
-                    sql = sql.replace(arrow, "->'scoreboards'") # Fallback to summary
-            
-            # If it's used as a column name, we might need the whole raw_json to decode it
+                    sql = sql.replace(arrow, "->'scoreboards'")
             if "raw_json" in sql and "scorecard" in sql:
-                # If they did SELECT f.raw_json->'scorecard', we want more.
-                # A safe bet is to just select the whole raw_json as raw_json
                 import re
                 sql = re.sub(r"([a-z0-9_]+\.)?raw_json\s*->\s*['\"]scorecard['\"]", r"\1raw_json", sql, flags=re.IGNORECASE)
+
+        # GUARDRAIL: Ensure robust team identification (COALESCE)
+        if "JOIN teams t_local" in sql or "JOIN teams t_visitor" in sql:
+            import re
+            # Much more robust regex: catches any alias, any spacing
+            old_local = r"JOIN teams t_local ON \([a-z0-9_.]+\s*->\s*'localteam'\s*->>\s*'id'\)::int\s*=\s*t_local\.id"
+            if re.search(old_local, sql, re.IGNORECASE):
+                logger.info("🛡️ GUARDRAIL: Old localteam JOIN detected. Injecting COALESCE...")
+                sql = re.sub(old_local, "JOIN teams t_local ON COALESCE((f.raw_json->'localteam'->>'id')::int, (f.raw_json->>'localteam_id')::int) = t_local.id", sql, flags=re.IGNORECASE)
+            
+            old_visitor = r"JOIN teams t_visitor ON \([a-z0-9_.]+\s*->\s*'visitorteam'\s*->>\s*'id'\)::int\s*=\s*t_visitor\.id"
+            if re.search(old_visitor, sql, re.IGNORECASE):
+                logger.info("🛡️ GUARDRAIL: Old visitorteam JOIN detected. Injecting COALESCE...")
+                sql = re.sub(old_visitor, "JOIN teams t_visitor ON COALESCE((f.raw_json->'visitorteam'->>'id')::int, (f.raw_json->>'visitorteam_id')::int) = t_visitor.id", sql, flags=re.IGNORECASE)
 
         return sql
 

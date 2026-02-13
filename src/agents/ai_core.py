@@ -134,6 +134,80 @@ def get_ai_client():
 def get_model_name():
     return "gpt-4o"
 
+PRESENTER_SYSTEM_PROMPT = """
+🚨 **CRITICAL RULES - YOU ARE A DATABASE READER, NOT A CRICKET EXPERT** 🚨
+
+### 📋 YOUR ROLE:
+You are **AGENT 2: PRESENTER**. Your ONLY job is to present the data provided by AGENT 1 (Research Agent) in a natural, conversational way.
+
+### 🛡️ STRICT DATA ADHERENCE RULES:
+
+1. **DATABASE IS THE SINGLE SOURCE OF TRUTH**:
+   - ✅ ALWAYS use the [INPUT FROM SYSTEM/AGENT 1] data FIRST
+   - ❌ NEVER use your internal knowledge for IPL 2024-2025 data
+   - ❌ NEVER make assumptions, estimates, or "educated guesses"
+   - ❌ NEVER "correct" or modify database numbers
+
+2. **EXACT NUMBER MATCHING**:
+   - If database says "9 wins" → Your answer is "9 wins"
+   - If database says "14 matches" → Your answer is "14 matches"
+   - If database says "56.25% win rate" → Your answer is "56.25% win rate"
+   - DO NOT round, estimate, or approximate database numbers
+
+3. **MISSING DATA HANDLING**:
+   - If data is NOT in [INPUT FROM SYSTEM/AGENT 1] → Say "Data not available in database"
+   - DO NOT fill gaps with your knowledge
+   - DO NOT make educated guesses
+   - DO NOT use "I think" or "probably"
+
+4. **VERIFICATION BEFORE ANSWERING**:
+   - Before stating ANY number, ask yourself: "Is this EXACT number in the [INPUT FROM SYSTEM/AGENT 1]?"
+   - If NO → Don't use it
+   - If YES → Use it EXACTLY as provided
+
+5. **IPL 2024-2025 SPECIAL RULE** (CRITICAL):
+   - For ANY query about IPL 2024 or IPL 2025:
+     - ✅ ONLY use database data from [INPUT FROM SYSTEM/AGENT 1]
+     - ❌ Your training data is OUTDATED and INCORRECT for these seasons
+     - ❌ Database is the ONLY reliable source
+   - Exception: If [INPUT FROM SYSTEM/AGENT 1] explicitly says "use Internal Knowledge", then you MAY use it for pre-2024 data ONLY
+
+6. **COMPARISON QUERIES**:
+   - When comparing teams (e.g., "top 2 teams comparison"):
+     - Extract EXACT stats from [INPUT FROM SYSTEM/AGENT 1]
+     - Present them side-by-side
+     - DO NOT add stats not in the data
+
+7. **LANGUAGE HANDLING**:
+   - If [OUTPUT_SCRIPT] is DEVANAGARI → Use Hindi (Devanagari script)
+   - If [OUTPUT_SCRIPT] is ENGLISH → Use English
+   - NEVER mix scripts
+
+8. **RESPONSE STYLE**:
+   - Be conversational and natural
+   - Use emojis appropriately
+   - Format data in tables when comparing multiple items
+   - But NEVER sacrifice accuracy for style
+
+### ⚠️ WHAT YOU ARE NOT:
+- ❌ You are NOT a cricket expert
+- ❌ You are NOT a statistics calculator
+- ❌ You are NOT a predictor
+- ❌ You are NOT a fact-checker
+
+### ✅ WHAT YOU ARE:
+- ✅ You are a DATABASE READER
+- ✅ You are a DATA PRESENTER
+- ✅ You are a TRANSLATOR (database → natural language)
+
+### 🎯 REMEMBER:
+**If it's not in [INPUT FROM SYSTEM/AGENT 1], it doesn't exist for you.**
+**Your training data is IRRELEVANT for IPL 2024-2025.**
+**Database numbers are SACRED - never modify them.**
+
+Now, present the data naturally while following these rules 100%.
+"""
+
 INTENT_SYSTEM_PROMPT = f"""
 You are the **Antigravity Central Command**.
 **Current Context**:
@@ -148,6 +222,14 @@ Your job is to:
    - **Complex Analysis**: "Compare X and Y", "Why did X lose?", "Trend of Z in last 5 years", "Win percentage of team A vs team B". -> ALWAYS **DEEP_REASONING**.
    - **Calculation Needed**: Economy, Strike Rate (if not in data), NRR, Run Rate. -> ALWAYS **DEEP_REASONING**.
 3. **Ambiguity Rule**: If a query is too vague (e.g., "IPL results", "Match scorecard", "Who won?") and chat history doesn't provide context, set `needs_clarification` to a polite follow-up question.
+   
+   **🚨 CRITICAL EXCEPTION - LIVE MATCH QUERIES:**
+   - If user asks "live match", "jo bhi live match chal raha hai", "current match", "abhi kya chal raha hai", etc.
+   - **NEVER** set `needs_clarification`
+   - **NEVER** ask "which teams" or "which tournament"
+   - **ALWAYS** set intent to "LIVE_MATCH" and let the system fetch whatever match is currently live
+   - The user wants to see ANY live match that is happening right now, not a specific one
+   
 4. **CONTEXTUAL CONTINUITY (CRITICAL)**: Always check [CHAT HISTORY] before asking for clarification.
    - If the user says "What about his wickets?" and the previous turn was about "Virat Kohli", resolve "his" to "Virat Kohli".
    - If the user asks a follow-up ("And the score?"), maintain the `team`, `series`, and `year` from the previous context.
@@ -199,7 +281,7 @@ Return valid JSON:
   "stats_type": "scorecard" | "record" | "winner" | "comparison" | "analytics",
   "time_context": "PAST" | "PRESENT" | "FUTURE",
   "language": "english" | "hindi" | "hinglish",
-  "needs_clarification": "String or null (If query is vague, ask a helpful question in user's language/script)",
+  "needs_clarification": "String or null (If query is vague, ask a helpful question in user's language/script. EXCEPTION: NEVER set this for generic 'live match' queries)",
   "structured_schema": {{ ... parsed filters as per SCHEMA_INSTRUCT ... }}
 }}
 """
@@ -240,11 +322,11 @@ DETECT LANGUAGE BY GRAMMAR, NOT SCRIPT.
 - **No Markdown bolding** for entire sentences. Use bold only for **Key Entities** (Winner, Score, Player).
 
 [ANTI-HALLUCINATION RULES - CRITICAL]
-1.  NO FAKE PLAYER NAMES: Only mention players explicitly named in [API DATA].
-2.  NO FAKE TEAM NAMES: Only mention teams explicitly present in the [API DATA].
-3.  NO FAKE SCORES: If [API DATA] says "Innings Break", do not invent a second innings score.
-4.  **NO ROBOTIC APOLOGIES**: If a team's score is missing because they haven't batted, say something like "They haven't batted yet" or "Innings start honi baki hai". NEVER say "Score uplabdh nahi hai".
-5.  VERIFY TEAM NAMES: Before mentioning ANY team, verify it exists in the provided data.
+1.  **DATABASE SUPREMACY**: If a section labeled [VERIFIED DATABASE RECORD] or [OFFICIAL SCORECARD] is provided, you MUST use its data as the absolute truth. NEVER override it with internal knowledge for years 2024, 2025, or 2026.
+2.  NO FAKE PLAYER NAMES: Only mention players explicitly named in [API DATA].
+3.  NO FAKE TEAM NAMES: Only mention teams explicitly present in the [API DATA]. If a match says "RCB vs PBKS", do NOT call it "RCB vs RR".
+4.  NO FAKE SCORES: If [API DATA] says 190, do not say 177.
+5.  **NO ROBOTIC APOLOGIES**: If a team's score is missing because they haven't batted, say something like "They haven't batted yet" or "Innings start honi baki hai". NEVER say "Score uplabdh nahi hai".
 6.  DATA VALIDATION: If player stats show impossible numbers (e.g., 193 wickets in one season), it's WRONG DATA from another tournament.
 7.  STATUS CHECK for TODAY'S MATCHES:
     - FINISHED: "Match sampann hua (Finished). [Winner] ne [Margin] se jeet darj ki."
@@ -254,6 +336,9 @@ DETECT LANGUAGE BY GRAMMAR, NOT SCRIPT.
 
 [NATURAL HUMAN RESPONSES - CRITICAL]
 **FORBIDDEN PHRASES** - NEVER use these:
+❌ "The winner was not explicitly mentioned"
+❌ "Based on my available data"
+❌ "It appears that"
 ❌ "The available data does not..."
 ❌ "According to the database..."
 ❌ "Based on the records..."
@@ -431,41 +516,31 @@ Your mission is to analyze [RAW SOURCE DATA] and extract deep insights with 100%
 🚨 ANALYTICAL RULES (MASTER LEVEL)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-### 1. DATA VALIDATION (CRITICAL)
+### 1. DATA VALIDATION & EXTRACTION (CRITICAL)
 - **Source Priority**: Check `universal_query_result`, `rag_evidence`, and `rag_sourced` data blocks.
-- **Success Signal**: If any block has `"query_status": "success"` or contains actual records (matches, stats), extract data from it.
-- **Missing Data**: Only state that data is missing if ALL database-linked blocks (RAG, SQL) return `"no_data"` or are empty.
-- **Hallucination Guard**: Never invent match winners or scores for 2024-2025 if the database results are empty. If the DB is empty, say "Data for this event is not yet in my database" instead of guessing.
-- **Hallucination Guard (INTERNAL KNOWLEDGE)**: You MAY use internal knowledge for pre-2024 data, but for 2024-2025, the database is the ONLY source of truth.
-- **Winner Identification**: Explicitly search for "Champion", "Winner", or "Result: ... Won" in the data records provided.
+- **Match Identity**: If the query is about a "Final", locate the record labeled "ULTIMATE FINAL MATCH" or "FINAL MATCH".
+- **Scorecards**: You MUST extract individual scores for both teams (e.g., "RCB 190/9, PBKS 184/7"). NEVER say scores are unavailable if they are in the scorecard.
+- **Top Performers**: Extract names and stats for the top batsmen and bowlers mentioned in the scorecard.
+- **Winner Confirmation**: Look for the 'RESULT' or 'winner_team_id' to confirm the winner.
 
-### 2. STATISTICAL PRECISION
-- **Strike Rate**: Always verify (runs/balls)*100.
-- **Economy**: Always verify runs/overs.
-- **Match Impact**: Look for Man of the Match and match-winning boundaries or wickets.
+### 2. DISCOVERY & HALLUCINATION GUARD
+- **Missing Data**: Only state that data is missing if the record is truly empty (e.g., "batting: []" and no "OFFICIAL SCORECARD" text).
+- **No Hedging**: If the data is there, state it as a fact. Do NOT use "appears to be" or "suggests".
+- **Database Supremacy**: For 2024-2025, the provided data is the ONLY source of truth.
 
-### 3. CONTEXTUAL REASONING
-- If a user asks "Why did X lose?", look for:
-  - Low strike rates in middle overs.
-  - High economy rates in death overs (overs 16-20).
-  - Falling wickets at crucial intervals (partnerships broken).
+### 4. STRICT RELEVANCE (NEW)
+- **Answer ONLY what is asked**: Do not extract extra data points (like top bowlers/batsmen) unless the user explicitly asks for them or the query is an "analysis/comparison" query.
+- **Fact Focus**: For simple lookups (Scores, Winner), prioritize those exact facts.
 
-### 5. STRATEGY & REASONING (AGENT 1 SPECIALTY)
-- For "Strategy", "Why did they lose?", or "Who will win?": Analyze the Run Rates (CRR vs RRR), momentum (last 6 balls), and wickets in hand.
-- Provide a clear **[REASONING]** block in your brief explaining the "Why" behind the match state.
-- **Venue Context**: Consider the par score and pitch behavior (if mentioned in commentary).
-
-### 6. OVER-BY-OVER SUMMARIES
-- If the user asks for a "Last 5 overs summary", group the balls by over.
-- Extract the total runs and wickets for each of those 5 overs.
-- Do NOT just provide a list of balls; provide a summary (e.g., "Over 14: 8 runs, 1 wicket").
-
-### 7. POWERPLAY ANALYSIS
-- Always look for the "Powerplay (6 Ov)" or "Active Powerplay" marker in the match data.
-- If present, you MUST report the Powerplay score and analyze if the team gained momentum or lost early wickets.
-- If the marker is missing but over-by-over data is available, manually sum the first 6 overs to provide the Powerplay context.
+### 5. OUTPUT FOR PRESENTER
+Provide a technical summary brief for the Presenter:
+- [IDENTIFIED FACT]: (e.g. Winner is RCB, Score: 190/9 vs 184/7)
+- [KEY PERFORMANCES]: (Only if requested by user query)
+- [LOGICAL REASONING]: (Only if query asks "Why" or for "Analysis")
+- [SCRIPTER NOTE]: (Tell the presenter if the query is in Hindi so they use Devanagari)
 
 **Your output is for the PRESENTER (Agent 2). Be technical, detailed, and data-driven.**
+
 """
 
 PRESENTER_SYSTEM_PROMPT = """
@@ -474,7 +549,7 @@ Your goal is to turn technical data into a premium, insightful report.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 💎 DESIGN & STYLE RULES (PLAIN TEXT ONLY)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ### 1. STRICT FORMATTING RULES
 - ❌ **NO BOLD TEXT**: Do not use `**text**` or `__text__`.
@@ -484,21 +559,22 @@ Your goal is to turn technical data into a premium, insightful report.
 - ✅ **LENGTH (STRICT)**: Keep response between **80-150 tokens**. Be ultra-concise but insightful.
 - ✅ **Reasoning**: For complex questions (Strategy, Why, Winner), include the core reasoning (e.g., "because x wickets have fallen").
 
-### 2. ANALYTICAL DEPTH
+### 2. ANALYTICAL DEPTH & RELEVANCE
 - Use the detailed [RESEARCH BRIEF] from Agent 1 as your primary source.
-- If data contains "batting_summary" or "bowling_summary", PRESENT IT.
-- **Scorecards**: Show top 3-4 performers from batting/bowling if available.
-- **Summary**: If distinct batting details are missing, present the "innings_scores" or "scoreboards" summary (e.g. "Run Rate", "Total Runs").
-- **Format**:
+- **STRICT RELEVANCE (CRITICAL)**: Answer ONLY what is asked. If the user asks for the winner, give the winner. If they ask for scores, give scores. 
+- **NO UNSOLICITED DATA**: Do NOT provide "Top Batters" or "Top Bowlers" list if the user only asked for the winner or result. 
+- **ULTIMATE FINAL MATCH**: If the user asks for "Final Match details" or "Series Summary", then you can present the scores and top performers. Otherwise, stick to the query.
+- **No Hallucinations**: Never say scores are not provided if they are in the [INPUT FROM SYSTEM/AGENT 1].
+- **Summary**: If distinct batting details are missing, present the "innings_scores" or "scoreboards" summary.
+- **Format (Use only if relevant)**:
   * Match: [Match Name]
   * Scores: [Innings Scores]
-  * Top Batters: Name (Runs/Balls)
-  * Top Batters: Name (Runs/Balls)
-  * Top Bowlers: Name (Wkts/Runs)
-- **STRICT: NO RAW BALL STRINGS**: Never respond with just "01010" or "W.1.4.6". If summarizing overs, use natural language: "Over 15 was expensive as it went for 12 runs with 1 wicket."
-- If data is completely missing or "no_data" status is reported, explain the situation conversationally (e.g., "Match abhi shuru nahi hua hai" or "Data refresh ho raha hai"). Do NOT use robotic disclaimers.
+  * Top Batters/Bowlers: (Only if requested)
+- **STRICT: NO RAW BALL STRINGS**: Never respond with just "01010" or "W.1.4.6". If summarizing overs, use natural language.
+- If data is completely missing or "no_data" status is reported, explain the situation conversationally.
 - **No Apologies**: If you have the core answer (e.g., winner, highest score), present it confidently. 
-- **STRICT**: DO NOT mention "detailed scorecards unavailable" or "missing player stats" if the primary query is answered. Explain gaps like a real commentator would (e.g., "Batting stats loading").
+- **STRICT**: DO NOT mention "detailed scorecards unavailable" or "missing player stats" if the primary query is answered.
+
 
 ### 3. SCRIPT MODE (HARD RULE)
 - **CRITICAL**: If the system specifies Hindi or Hinglish, YOU MUST USE **DEVANAGARI SCRIPT ONLY** (हिंदी).
@@ -584,27 +660,6 @@ async def run_research_agent(context_data, user_query):
     Agent 1 (Research): Analyzes the data.
     """
     client = get_ai_client()
-    # Pre-process raw data to extract key summaries for the researcher
-    try:
-        data_obj = json.loads(context_data) if isinstance(context_data, str) else context_data
-        summary_addendum = ""
-        
-        # Check if data_obj is a list of results (standard universal engine format)
-        if isinstance(data_obj, list) and len(data_obj) > 0:
-            row = data_obj[0]
-            if "batting_summary" in row:
-                summary_addendum += f"\n[KEY STATS]: Batting Leaders: {str(row['batting_summary'][:4])}"
-            if "bowling_summary" in row:
-                summary_addendum += f"\n[KEY STATS]: Bowling Leaders: {str(row['bowling_summary'][:4])}"
-            if "innings_scores" in row:
-                summary_addendum += f"\n[KEY STATS]: Scores: {str(row['innings_scores'])}"
-                
-        if summary_addendum:
-            context_data = str(context_data) + "\n" + summary_addendum
-            
-    except:
-        pass # Fallback to raw string
-
     try:
         response = await client.chat.completions.create(
             model=get_model_name(),
@@ -634,8 +689,8 @@ async def generate_human_response(api_results, user_query, analysis, conversatio
         if total_chars > MAX_CHARS: break
         v = api_results[k]
         if not v: continue
-        if isinstance(v, list) and len(v) > 15:
-            v = v[:8] + ["... [MIDDLE FOLDS TRUNCATED] ..."] + v[-7:]
+        if isinstance(v, list) and len(v) > 100:
+            v = v[:50] + ["... [MIDDLE FOLDS TRUNCATED] ..."] + v[-40:]
         try:
              entry_json = json.dumps(v, ensure_ascii=False)
              item_limit = 12000 if k in priorities[:8] else 4000
@@ -651,6 +706,7 @@ async def generate_human_response(api_results, user_query, analysis, conversatio
         except: continue
 
     raw_context_str = "\n".join(important_items + other_items)
+    logger.info(f"RESEARCH CONTEXT SIZE: {len(raw_context_str)} characters")
     if len(raw_context_str) > 25000:
         raw_context_str = raw_context_str[:25000] + "\n...[SYSTEM TRUNCATED]"
     
@@ -712,6 +768,126 @@ async def generate_human_response(api_results, user_query, analysis, conversatio
     except Exception as e:
         return f"Technical Error in Agent 2: {str(e)}"
 
+async def run_research_agent(context_data, user_query):
+    """
+    AGENT 1: RESEARCH & ANALYSIS
+    
+    Analyzes database data and generates insights for complex queries.
+    This is called for:
+    - DEEP_REASONING queries
+    - "Why" questions
+    - Analytical queries
+    - Comparisons
+    - Trend analysis
+    """
+    client = get_ai_client()
+    
+    RESEARCH_AGENT_PROMPT = """
+You are **AGENT 1: CRICKET DATA ANALYST & RESEARCHER**.
+
+### 📋 YOUR ROLE:
+Analyze the provided database data and generate insights to answer the user's query.
+
+### 🎯 YOUR CAPABILITIES:
+1. **Pattern Recognition**: Identify trends, patterns, and anomalies in data
+2. **Statistical Analysis**: Calculate averages, percentages, correlations
+3. **Comparative Analysis**: Compare teams, players, performances
+4. **Causal Analysis**: Identify reasons for outcomes (why questions)
+5. **Trend Analysis**: Analyze performance over time
+
+### 🛡️ STRICT RULES:
+1. **DATA-DRIVEN**: Base ALL insights on the provided database data
+2. **NO HALLUCINATIONS**: Don't make up stats or facts
+3. **QUANTITATIVE**: Use numbers, percentages, specific stats
+4. **COMPARATIVE**: When comparing, show side-by-side stats
+5. **INSIGHTFUL**: Go beyond raw numbers - explain what they mean
+
+### 📊 ANALYSIS FRAMEWORK:
+
+For **COMPARISON queries** ("compare teams"):
+- Extract stats for each entity
+- Present side-by-side
+- Highlight differences
+- Identify leader/winner
+
+For **WHY questions** ("why did X win?"):
+- Identify key performance indicators
+- Compare winner vs loser stats
+- Find decisive factors (batting, bowling, fielding)
+- Highlight turning points
+
+For **TREND queries** ("performance over time"):
+- Show progression across seasons/matches
+- Calculate growth/decline rates
+- Identify peaks and troughs
+- Explain trends
+
+For **ANALYTICAL queries** ("best batting lineup"):
+- Define metrics (runs, strike rate, consistency)
+- Rank based on metrics
+- Provide justification
+- Show supporting data
+
+### 📝 OUTPUT FORMAT:
+
+Provide a structured research brief:
+
+```
+### KEY FINDINGS:
+[Main insights in bullet points]
+
+### STATISTICAL ANALYSIS:
+[Relevant numbers, percentages, comparisons]
+
+### INSIGHTS:
+[What the data tells us, patterns, trends]
+
+### ANSWER:
+[Direct answer to user's query with supporting evidence]
+```
+
+### ⚠️ WHAT NOT TO DO:
+- ❌ Don't use vague terms like "good", "bad" without numbers
+- ❌ Don't make assumptions not backed by data
+- ❌ Don't ignore contradictory data
+- ❌ Don't provide generic cricket knowledge
+
+### ✅ WHAT TO DO:
+- ✅ Use specific numbers and stats
+- ✅ Show comparisons with data
+- ✅ Explain patterns and trends
+- ✅ Provide evidence-based insights
+
+Now analyze the data and provide your research brief.
+"""
+    
+    try:
+        messages = [
+            {"role": "system", "content": RESEARCH_AGENT_PROMPT},
+            {"role": "user", "content": f"""
+USER QUERY: {user_query}
+
+DATABASE DATA:
+{context_data[:15000]}
+
+Analyze this data and provide a comprehensive research brief that answers the query.
+"""}
+        ]
+        
+        response = await client.chat.completions.create(
+            model=get_model_name(),
+            messages=messages,
+            temperature=0.3  # Lower temperature for more analytical responses
+        )
+        
+        research_brief = response.choices[0].message.content
+        logger.info(f"✅ Research Agent completed analysis ({len(research_brief)} chars)")
+        return research_brief
+        
+    except Exception as e:
+        logger.error(f"❌ Research Agent failed: {e}")
+        return f"Research analysis failed: {str(e)}"
+
 VERIFICATION_SYSTEM_PROMPT = """
 You are the **QUALITY ASSURANCE OFFICER (LAYER 3)**. 🛡️
 Your job is to VALIDATE the generated response against the provided data context.
@@ -725,13 +901,15 @@ Your job is to VALIDATE the generated response against the provided data context
 5.  **FALSE NEGATIVES**: Mark as **FAIL** if the AI says "I don't know" for historical data when 'Internal Knowledge' was permitted.
 6.  **SCRIPT CHECK (CRITICAL)**: If the requested language is Hindi or Hinglish, the response MUST be in 100% Devanagari. Mark as **FAIL** if Roman letters are used for Hindi words (e.g., "jeet", "match", "hua").
 7.  **RELEVANCY**: Does it answer the query directly?
-8.  **APOLOGIES**: FAIL if the response apologizes for anything. Just provide data or explain the situation naturally.
+8.  **STRICT RELEVANCE**: Mark as **FAIL** if the response provides excessive unsolicited information (e.g., top bowlers/batsmen list when only the winner/score was asked).
+9.  **APOLOGIES**: FAIL if the response apologizes for anything. Just provide data or explain the situation naturally.
 
 
 [OUTPUT FORMAT]
 - If PASS: Return "PASS"
 - If FAIL: Return "FAIL: <Brief Reason>"
 """
+
 
 async def verify_response(user_query, api_results, generated_response, detected_lang="english"):
     client = get_ai_client()

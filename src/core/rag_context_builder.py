@@ -182,16 +182,16 @@ class ContextBuilder:
         # Season info
         if season_data.get('season_info'):
             info = season_data['season_info']
-            context_parts.append(f"🏆 **SEASON: {info.get('name', 'Unknown')} {info.get('year', '')}**\n")
+            context_parts.append(f"SEASON: {info.get('name', 'Unknown')} {info.get('year', '')}\n")
         
         # Champion
         if season_data.get('champion'):
             champ = season_data['champion']
-            context_parts.append(f"👑 **CHAMPION:** {champ.get('winner_team', 'Unknown')}\n")
+            context_parts.append(f"CHAMPION: {champ.get('winner_team', 'Unknown')}\n")
         
         # Awards
         if season_data.get('awards'):
-            context_parts.append("🏅 **AWARDS:**")
+            context_parts.append("AWARDS:")
             for award in season_data['awards']:
                 context_parts.append(
                     f"  - {award.get('award_type', 'Unknown')}: "
@@ -199,27 +199,40 @@ class ContextBuilder:
                     f"({award.get('value', '')})"
                 )
             context_parts.append("")
-        
+
         # Final Match Details (CRITICAL for "score" queries)
         if season_data.get('final_match'):
             fm = season_data['final_match']
-            context_parts.append(f"\n🏆 **FINAL MATCH:** {fm.get('name', 'Unknown')}")
-            context_parts.append(f"📅 Date: {fm.get('starting_at', 'N/A')}")
-            context_parts.append(f"🏁 Result: {fm.get('result', 'N/A')}")
+            context_parts.append("\n" + "="*40)
+            context_parts.append("ULTIMATE FINAL MATCH (VERIFIED DATABASE RECORD)")
+            context_parts.append(f"MATCH: {fm.get('name', 'Unknown')}")
+            context_parts.append(f"DATE: {fm.get('starting_at', 'N/A')}")
+            context_parts.append(f"RESULT: {fm.get('result', 'N/A')}")
             
             if fm.get('innings_summary'):
-                context_parts.append("**Scorecard:**")
+                context_parts.append("\nOFFICIAL SCORECARD:")
                 for inn in fm['innings_summary']:
                     tname = inn.get('team_name') or f"Team {inn.get('team_id')}"
-                    context_parts.append(
-                        f"  - {tname}: {inn.get('score')}/{inn.get('wickets')} "
-                        f"in {inn.get('overs')} overs"
-                    )
-            context_parts.append("")
+                    score = inn.get('score')
+                    wickets = inn.get('wickets')
+                    overs = inn.get('overs')
+                    context_parts.append(f"  - {tname}: {score}/{wickets} in {overs} overs")
+            
+            if fm.get('top_batsmen'):
+                context_parts.append("\nTOP BATTING PERFORMANCES:")
+                for bat in fm['top_batsmen']:
+                    context_parts.append(f"  - {bat.get('name')}: {bat.get('runs')} ({bat.get('balls')}b, SR: {bat.get('sr')})")
+            
+            if fm.get('top_bowlers'):
+                context_parts.append("\nTOP BOWLING PERFORMANCES:")
+                for bowl in fm['top_bowlers']:
+                    context_parts.append(f"  - {bowl.get('name')}: {bowl.get('wickets')}/{bowl.get('runs')} in {bowl.get('overs')} ov")
+            
+            context_parts.append("="*40 + "\n")
 
         # Key Matches (Playoffs)
         if season_data.get('key_matches'):
-             context_parts.append("🔥 **PLAYOFFS / KEY MATCHES:**")
+             context_parts.append("PLAYOFFS / KEY MATCHES:")
              for km in season_data['key_matches']:
                  # Skip if it's the final (already shown)
                  if season_data.get('final_match') and km.get('id') == season_data['final_match'].get('id'):
@@ -229,11 +242,11 @@ class ContextBuilder:
 
         # Match summary (General)
         total_matches = season_data.get('total_matches', 0)
-        context_parts.append(f"📊 **Total Matches:** {total_matches}\n")
+        context_parts.append(f"Total Matches: {total_matches}\n")
         
         if season_data.get('matches') and len(season_data['matches']) > 0:
             matches = season_data['matches']
-            context_parts.append("📋 **Regular Season Samples:**")
+            context_parts.append("Regular Season Samples:")
             
             # Show first 3 and last 3 if there are more than 6
             sample_matches = matches

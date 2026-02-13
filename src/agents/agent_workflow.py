@@ -181,77 +181,65 @@ async def process_user_message(user_query, conversation_history=None):
         is_pure_historical or is_mixed
     )
     
-    # EXCEPTION: If it is about TODAY, we don't treat it as "Pure Past" for DB-only sourcing.
-    # We still allow RAG, but we will ensure Live API data is fetched later.
+    
+    # --- RAG PIPELINE EXECUTION (FOR ALL DATABASE QUERIES) ---
+    rag_result = {"status": "skipped", "data_count": 0}
+    if is_pure_database or is_mixed or (no_year_detected and intent != "GENERAL"):
+         ctx_logger.info("📡 Executing RAG Pipeline for Database context...")
+         rag_result = await execute_rag_pipeline(user_query, analysis)
+    
+    # Configure Internal Knowledge permission based on routing
+    if is_pure_historical or is_mixed or no_year_detected:
+         ctx_logger.info("📚 Enabling Internal Knowledge Fallback.")
+         api_results["internal_knowledge_allowed"] = True
+         
+         instructions = []
+         if is_mixed:
+             instructions.append(f"[MIXED QUERY DETECTED]: Years {old_years} are Historical. Years {new_years} are in Database.")
+             instructions.append("1. Answer data for years <= 2023 using your internal knowledge.")
+             instructions.append("2. Answer data for years >= 2024 using the provided database results.")
+         elif is_pure_historical:
+             instructions.append(f"[HISTORICAL QUERY]: For years {old_years}, use ONLY internal knowledge.")
+         elif no_year_detected:
+             instructions.append("[CAREER/GENERAL QUERY]: No specific year detected. Use internal knowledge for career stats and database for recent (2024-25) matches.")
+
+         if "rag_evidence" not in api_results: api_results["rag_evidence"] = ""
+         api_results["rag_evidence"] = "\n".join(instructions) + "\n" + api_results["rag_evidence"]
+         
+         if is_pure_historical:
+             rag_result["status"] = "success"
+
+    if rag_result.get("status") == "success":
+        ctx_logger.info(f"✅ RAG Success: Retrieved {rag_result.get('data_type')} data ({rag_result.get('data_count')} records)")
+        existing_ev = api_results.get("rag_evidence", "")
+        rag_ctx = rag_result.get("context", "")
+        api_results["rag_evidence"] = rag_ctx + "\n" + existing_ev
+        
+        api_results["universal_query_result"] = {
+            "query_status": "success",
+            "data": rag_result.get("raw_data"),
+            "count": rag_result.get("data_count"),
+            "data_type": rag_result.get("data_type")
+        }
+        
+        if rag_result.get("data_type") == "match":
+            if rag_result.get("raw_data") and len(rag_result.get("raw_data")) > 0:
+                 api_results["historical_match_focus"] = {
+                     "match_info": rag_result.get("raw_data")[0],
+                     "rag_sourced": True
+                 }
+        
+        if rag_result.get("data_count", 0) > 0:
+             ctx_logger.info("RAG provided sufficient data. Optimizing tool usage...")
+             tools_to_remove = ["execute_smart_query", "search_historical_matches"]
+             required_tools = [t for t in required_tools if t not in tools_to_remove]
+    else:
+        if rag_result.get("error"):
+            ctx_logger.error(f"❌ RAG Pipeline Failed: {rag_result.get('error')}")
+
+    # --- LIVE API CHECK (ONLY FOR TODAY'S QUERIES) ---
     if is_about_today:
-        ctx_logger.info("📍 Query identifies as TODAY -> Ensuring Live API check regardless of 'Past' status.")
-        ctx_logger.info(f"LOGIC: Historical={is_pure_historical} | DB={is_pure_database} | Mixed={is_mixed} | NoYear={no_year_detected}")
-        
-        # Execute RAG Pipeline for Database years (>= 2024)
-        rag_result = {"status": "skipped", "data_count": 0}
-        if is_pure_database or is_mixed or (no_year_detected and intent != "GENERAL"):
-             ctx_logger.info("📡 Executing RAG Pipeline for Database context...")
-             rag_result = await execute_rag_pipeline(user_query, analysis)
-        
-        # Configure Internal Knowledge permission based on routing
-        if is_pure_historical or is_mixed or no_year_detected:
-             ctx_logger.info("📚 Enabling Internal Knowledge Fallback.")
-             api_results["internal_knowledge_allowed"] = True
-             
-             instructions = []
-             if is_mixed:
-                 instructions.append(f"[MIXED QUERY DETECTED]: Years {old_years} are Historical. Years {new_years} are in Database.")
-                 instructions.append("1. Answer data for years <= 2023 using your internal knowledge.")
-                 instructions.append("2. Answer data for years >= 2024 using the provided database results.")
-             elif is_pure_historical:
-                 instructions.append(f"[HISTORICAL QUERY]: For years {old_years}, use ONLY internal knowledge.")
-             elif no_year_detected:
-                 instructions.append("[CAREER/GENERAL QUERY]: No specific year detected. Use internal knowledge for career stats and database for recent (2024-25) matches.")
-
-             if "rag_evidence" not in api_results: api_results["rag_evidence"] = ""
-             api_results["rag_evidence"] += "\n" + "\n".join(instructions)
-             
-             # If it was pure historical and RAG was skipped/failed, force success to proceed to Presenter
-             if is_pure_historical:
-                 rag_result["status"] = "success"
-
-        if rag_result.get("status") == "success":
-            ctx_logger.info(f"✅ RAG Success: Retrieved {rag_result.get('data_type')} data ({rag_result.get('data_count')} records)")
-            
-            # Store the main context evidence for the LLM
-            # Store the main context evidence for the LLM
-            if "rag_evidence" not in api_results:
-                 api_results["rag_evidence"] = rag_result.get("context")
-            
-            # CRITICAL: Populate universal_query_result with status for the Research Agent
-            api_results["universal_query_result"] = {
-                "query_status": "success",
-                "data": rag_result.get("raw_data"),
-                "count": rag_result.get("data_count"),
-                "data_type": rag_result.get("data_type")
-            }
-            
-            # Use raw data to populate specific fields if needed
-            if rag_result.get("data_type") == "match":
-                if rag_result.get("raw_data") and len(rag_result.get("raw_data")) > 0:
-                     api_results["historical_match_focus"] = {
-                         "match_info": rag_result.get("raw_data")[0],
-                         "rag_sourced": True
-                     }
-            
-            # If RAG found data, we can often skip legacy tools to avoid redundancy/errors
-            if rag_result.get("data_count", 0) > 0:
-                 ctx_logger.info("RAG provided sufficient data. Optimizing tool usage...")
-                 # Filter out some legacy tools if RAG covered them
-                 tools_to_remove = ["execute_smart_query", "search_historical_matches"]
-                 required_tools = [t for t in required_tools if t not in tools_to_remove]
-                 
-        else:
-             ctx_logger.error(f"❌ RAG Pipeline Failed: {rag_result.get('error')}")
-             ctx_logger.info("Falling back to legacy tools...")
-             # Fallback to Universal Engine directly if RAG failed (though RAG tries it internally)
-             # But if RAG error was catastrophic, we might try one last direct shot? 
-             # Actually RAG Orchestrator already does fallback. So we just rely on legacy tools in 'required_tools'.
+        ctx_logger.info("📍 Query about TODAY -> Will check Live API for real-time data.")
 
     for tool in required_tools:
         try:

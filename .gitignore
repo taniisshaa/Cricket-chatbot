@@ -8,3 +8,5 @@ logs/
 tmp/
 *.db
 data/*.db
+data/sessions/
+.streamlit/
