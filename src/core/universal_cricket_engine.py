@@ -5,9 +5,10 @@ from psycopg2.extras import RealDictCursor
 from datetime import datetime
 from openai import AsyncOpenAI
 from src.utils.utils_core import Config
+from src.utils.utils_core import get_logger
 
 # -------------------------------------------------------------------------
-# 🚀 ULTRA EXPERT CRICKET SQL ENGINE (PostgreSQL Optimized)
+# 🚀 ULTRA EXPERT CRICKET SQL ENGINE (PostgreSQL Optimized - LOGIC MODE)
 # -------------------------------------------------------------------------
 DB_CONFIG = {
     "dbname": "cricket_db",
@@ -16,6 +17,48 @@ DB_CONFIG = {
     "host": "localhost",
     "port": "5432"
 }
+
+SYSTEM_PROMPT = """You are the **CRICKET SQL ARCHITECT**. Generate accurate PostgreSQL queries.
+
+### 🏗️ SCHEMA (Tables & JSON)
+- **fixtures**: id, season_id, venue_id, name, starting_at, status, winner_team_id, raw_json.
+  - `raw_json`: `scoreboards` (list), `batting` (list), `bowling` (list), `localteam`, `visitorteam`, `venue`.
+  - **IDs**: `COALESCE((raw_json->'localteam'->>'id')::int, (raw_json->>'localteam_id')::int)`
+- **venues**: id, name, city, capacity. (Join `fixtures.venue_id = venues.id`).
+- **seasons**: id, league_id, name, year, code.
+- **leagues**: id, name, code ('IPL').
+- **teams**: id, name, code.
+- **players**: id, fullname.
+- **season_champions**: season_id, winner_team_id.
+
+### 🧠 LOGIC KERNEL
+1. **Basics**: JOIN `leagues`->`seasons`->`fixtures`. Join `venues` if location/stadium is requested.
+2. **Winners**: `season_champions` (Season), `fixtures.winner_team_id` (Match).
+3. **✨ AWARDS (Dynamic Calculation)**:
+   - **Orange Cap**: `SUM((x->>'score')::int)` from `raw_json->'batting'`. Order DESC. **Tie-Break**: Higher SR.
+   - **Purple Cap**: `SUM((x->>'wickets')::int)` from `raw_json->'bowling'`. Order DESC. **Tie-Break**: Lower Eco.
+4. **📊 POINTS TABLE**:
+   - **Formula**: `(Wins * 2) + (No Result * 1)`.
+   - **Query**: agg wins/NR from `fixtures`. Order by Points DESC.
+5. **⚡ PHASE ANALYSIS (Wickets)**:
+   - **Powerplay**: `(bat->>'fow_balls')::float < 6.0`.
+   - **Death**: `(bat->>'fow_balls')::float >= 16.0`.
+   - **Rate**: `Count(Wickets) / Count(Matches)`.
+
+### ⛔ RULES
+- **No Hallucinations**: Don't invent specific columns not listed.
+- **JSON**: Use `jsonb_array_elements`. `COALESCE` nulls.
+
+### 📝 FORMAT
+[REASONING]
+1. Goal: ...
+2. Logic: ...
+[SQL]
+```sql
+SELECT ...
+```
+"""
+
 
 def _process_raw_json_results(rows):
     """Processes PostgreSQL JSONB results into flattened row format."""
@@ -87,526 +130,8 @@ def _process_raw_json_results(rows):
         # CRITICAL: Delete the 200KB blob so it doesn't get truncated or blow up context
         if "raw_json" in row: del row["raw_json"]
 
-SYSTEM_PROMPT = """You are the **SUPREME CRICKET SQL ARCHITECT**.
-Your mission is to generate **100% accurate, high-performance PostgreSQL queries**.
 
-### 🏗️ DATABASE SCHEMA (PRECISE)
-- **fixtures**: `id` (int), `season_id` (int), `name` (text), `starting_at` (timestamp), `status` (text), `venue_id` (int), `winner_team_id` (int), `toss_won_team_id` (int), `man_of_match_id` (int), `raw_json` (jsonb).
-  - **`raw_json` Structure**:
-    - `scoreboards`: Array `[{ "team_id": int, "total": int, "wickets": int, "overs": float, "type": "total" }]`
-    - `batting`: Array `[{ "batsman": { "fullname": text, "id": int }, "score": int, "ball": int, "four_x": int, "six_x": int, "rate": float }]`
-    - `bowling`: Array `[{ "player_id": int, "overs": float, "runs": int, "wickets": int, "rate": float, "medians": int (Maidens), "wide": int, "noball": int }]`
-    - `localteam` / `visitorteam`: Object `{"id": int, "name": text}`
-- **seasons**: `id` (int), `league_id` (int), `name` (text), `year` (text), `code` (text), `raw_json` (jsonb).
-- **leagues**: `id` (int), `name` (text), `code` (text), `type` (text), `raw_json` (jsonb).
-- **teams**: `id` (int), `name` (text), `code` (text), `raw_json` (jsonb).
-- **players**: `id` (int), `fullname` (text), `dateofbirth` (text), `batting_style` (text), `bowling_style` (text), `country_id` (int), `raw_json` (jsonb).
-- **season_champions**: `id` (int), `season_id` (int), `league_id` (int), `year` (text), `winner_team_id` (int), `runner_up_team_id` (int), `final_match_id` (int).
-- **season_awards**: `id` (int), `season_id` (int), `award_type` (text), `player_id` (int), `player_name` (text), `team_name` (text), `stats` (text).
-- **venues**: `id` (int), `name` (text), `city` (text), `capacity` (int), `raw_json` (jsonb).
-
-### ⛔ FORBIDDEN PATTERNS (DO NOT USE)
-- ❌ `raw_json->'scorecard'` (DOES NOT EXIST)
-- ❌ `raw_json->'match_summary'` (DOES NOT EXIST)
-- ❌ `raw_json->'statistics'` (DOES NOT EXIST)
-- ❌ `dots` / `dot_balls` (DOES NOT EXIST in bowling data)
-- ✅ USE ONLY: `batting`, `bowling` (has maidens/wides/noballs), `scoreboards`, `winner_team_id`.
-
-### 🏆 CORE SQL LOGICS (NO HARDCODING)
-
--1. **Team Performance Aggregation (WINS/LOSSES COUNT)**:
-   ```sql
-   -- LOGIC: For queries like "how many wins", "performance", "record"
-   -- Calculate aggregated stats directly in SQL for 100% accuracy
-   WITH team_matches AS (
-     SELECT f.id, f.name, f.winner_team_id,
-            CASE WHEN f.winner_team_id = t.id THEN 1 ELSE 0 END as is_win
-     FROM fixtures f
-     JOIN seasons s ON f.season_id = s.id
-     JOIN leagues l ON s.league_id = l.id
-     JOIN teams t_local ON COALESCE((f.raw_json->'localteam'->>'id')::int, (f.raw_json->>'localteam_id')::int) = t_local.id
-     JOIN teams t_visitor ON COALESCE((f.raw_json->'visitorteam'->>'id')::int, (f.raw_json->>'visitorteam_id')::int) = t_visitor.id
-     CROSS JOIN teams t
-     WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%')
-       AND s.year = '[Year]'
-       AND f.status = 'Finished'
-       AND (t.name ILIKE '%[TeamName]%' OR t.code = '[TeamCode]')
-       AND (t_local.id = t.id OR t_visitor.id = t.id)
-   )
-   SELECT 
-     COUNT(*) as total_matches,
-     SUM(is_win) as wins,
-     COUNT(*) - SUM(is_win) as losses,
-     ROUND(100.0 * SUM(is_win) / COUNT(*), 2) as win_percentage
-   FROM team_matches;
-   ```
-
-0. **Latest Match / Season Final Results**:
-   ```sql
-   -- LOGIC: Retrieve the SEASON FINALE or LATEST MATCH with robust score verification.
-   SELECT f.name as match, f.status, f.venue_id, t_win.name as winner_name,
-          t_local.name as local_team_name, t_visitor.name as visitor_team_name,
-          CASE 
-            WHEN (sb_local->>'total')::int > 0 THEN (sb_local->>'total')::int
-            ELSE (SELECT COALESCE(SUM((x->>'score')::int), 0) FROM jsonb_array_elements(f.raw_json->'batting') x WHERE (x->>'team_id')::int = t_local.id)
-          END as local_score_final,
-          CASE 
-            WHEN (sb_visitor->>'total')::int > 0 THEN (sb_visitor->>'total')::int
-            ELSE (SELECT COALESCE(SUM((x->>'score')::int), 0) FROM jsonb_array_elements(f.raw_json->'batting') x WHERE (x->>'team_id')::int = t_visitor.id)
-          END as visitor_score_final,
-          f.raw_json->'scoreboards' as original_summary
-   FROM fixtures f
-   JOIN seasons s ON f.season_id = s.id
-   JOIN leagues l ON s.league_id = l.id
-   LEFT JOIN teams t_win ON f.winner_team_id = t_win.id
-   JOIN teams t_local ON COALESCE((f.raw_json->'localteam'->>'id')::int, (f.raw_json->>'localteam_id')::int) = t_local.id
-   JOIN teams t_visitor ON COALESCE((f.raw_json->'visitorteam'->>'id')::int, (f.raw_json->>'visitorteam_id')::int) = t_visitor.id
-   LEFT JOIN LATERAL jsonb_array_elements(f.raw_json->'scoreboards') sb_local ON (sb_local->>'team_id')::int = t_local.id AND (sb_local->>'type' = 'total')
-   LEFT JOIN LATERAL jsonb_array_elements(f.raw_json->'scoreboards') sb_visitor ON (sb_visitor->>'team_id')::int = t_visitor.id AND (sb_visitor->>'type' = 'total')
-   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%')
-     AND s.year = '[Year]' AND f.status = 'Finished'
-   ORDER BY CASE WHEN f.name ILIKE '%Final%' THEN 0 ELSE 1 END, f.starting_at DESC LIMIT 1;
-   ```
-
-1. **Highest and Lowest Team Totals (RECORDS)**:
-   ```sql
-   -- LOGIC: Use jsonb_array_elements on 'scoreboards' to find team totals.
-   -- MANDATORY: Filter (sb->>'scoreboard') IN ('S1', 'S2') to exclude Super Overs.
-   -- MANDATORY: Filter (sb->>'total')::int > 0 and (sb->>'overs')::float >= 5 to ensure valid innings.
-   SELECT f.name as match, (sb->>'total')::int as total_score, (sb->>'overs')::float as overs, t.name as team,
-          f.winner_team_id,
-          f.raw_json->'scoreboards' as score_summary
-   FROM fixtures f
-   JOIN seasons s ON f.season_id = s.id
-   JOIN leagues l ON s.league_id = l.id
-   CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'scoreboards') AS sb
-   JOIN teams t ON (sb->>'team_id')::int = t.id
-   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') 
-     AND s.year = '[Year]' AND f.status = 'Finished'
-     AND (sb->>'scoreboard') IN ('S1', 'S2')
-     AND (sb->>'total')::int > 0
-   ORDER BY total_score ASC -- Use ASC for lowest, DESC for highest
-   LIMIT 1;
-   ```
-
-2. **Highest Individual Score**:
-   ```sql
-   -- LOGIC: Find the single highest score in an innings.
-   SELECT p.fullname as player, (bat->>'score')::int as score, (bat->>'ball')::int as balls, f.name as match
-   FROM fixtures f
-   JOIN seasons s ON f.season_id = s.id
-   JOIN leagues l ON s.league_id = l.id
-   CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'batting') AS bat
-   JOIN players p ON (bat->>'player_id')::int = p.id
-   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]'
-   ORDER BY score DESC LIMIT 1;
-   ```
-
-3. **Tournament Outcomes (Champion/Runner-up)**:
-   ```sql
-   -- Champion from season_champions
-   SELECT t.name as champion, l.name as tournament, s.year
-   FROM season_champions sc
-   JOIN seasons s ON sc.season_id = s.id
-   JOIN leagues l ON s.league_id = l.id
-   JOIN teams t ON sc.winner_team_id = t.id
-   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]';
-   
-   -- Runner-up (Derived from final match loser)
-   SELECT t_lose.name AS runner_up
-   FROM season_champions sc
-   JOIN fixtures f ON sc.final_match_id = f.id
-   JOIN teams t_lose ON (
-       CASE 
-           WHEN f.winner_team_id = COALESCE((f.raw_json->>'localteam_id')::int, (f.raw_json->'localteam'->>'id')::int) 
-           THEN COALESCE((f.raw_json->>'visitorteam_id')::int, (f.raw_json->'visitorteam'->>'id')::int) 
-           ELSE COALESCE((f.raw_json->>'localteam_id')::int, (f.raw_json->'localteam'->>'id')::int) 
-       END
-   ) = t_lose.id
-   JOIN seasons s ON sc.season_id = s.id
-   JOIN leagues l ON s.league_id = l.id
-   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]';
-   ```
-
-4. **Orange Cap (Most Runs)**:
-   -- LOGIC: Check season_awards FIRST. Fallback to aggregation if empty.
-   SELECT award_type as category, player_name as player, stats as value
-   FROM season_awards sa
-   JOIN seasons s ON sa.season_id = s.id
-   JOIN leagues l ON s.league_id = l.id
-   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]'
-     AND sa.award_type ILIKE '%Orange Cap%'
-   UNION ALL
-   SELECT 'Calculated Orange Cap' as category, p.fullname AS player, SUM((bat->>'score')::int)::text AS value
-   FROM fixtures f
-   JOIN seasons s ON f.season_id = s.id
-   JOIN leagues l ON s.league_id = l.id
-   CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'batting') AS bat
-   JOIN players p ON (bat->>'player_id')::int = p.id
-   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]'
-     AND NOT EXISTS (SELECT 1 FROM season_awards sa2 JOIN seasons s2 ON sa2.season_id = s2.id WHERE s2.year = '[Year]' AND sa2.award_type ILIKE '%Orange Cap%')
-   GROUP BY p.fullname ORDER BY value DESC LIMIT 1;
-   ```
-
-5. **Detailed Match Analysis (Batting/Bowling)**:
-   ```sql
-   -- Use for "Scorecard", "Match Details", "Who scored runs in match X".
-   SELECT f.name as match, f.status, f.venue_id, t.name as winner_name,
-          (SELECT jsonb_agg(jsonb_build_object('player', COALESCE(p.fullname, 'Unknown'), 'runs', (x->>'score')::int, 'balls', (x->>'ball')::int, 'sr', (x->>'rate')::float))
-           FROM jsonb_array_elements(f.raw_json->'batting') x LEFT JOIN players p ON (x->>'player_id')::int = p.id) as batting_data,
-          f.raw_json->'scoreboards' as score_summary
-   FROM fixtures f
-   JOIN seasons s ON f.season_id = s.id
-   JOIN leagues l ON s.league_id = l.id
-   LEFT JOIN teams t ON f.winner_team_id = t.id
-   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%')
-     AND s.year = '[Year]' AND (f.name ILIKE '%[TeamA]%' OR f.name ILIKE '%[TeamB]%')
-   ORDER BY f.starting_at DESC LIMIT 1;
-   ```
-
-   -- Alternative for non-final matches:
-   ```sql
-   SELECT f.name as match, f.status, f.venue_id, f.winner_team_id, t.name as winner_name,
-          (
-            SELECT jsonb_agg(jsonb_build_object('player', COALESCE(p.fullname, 'Unknown'), 'runs', (x->>'score')::int, 'balls', (x->>'ball')::int, 'sr', (x->>'rate')::float))
-            FROM jsonb_array_elements(f.raw_json->'batting') x
-            LEFT JOIN players p ON (x->>'player_id')::int = p.id
-          ) as batting_data,
-          (
-            SELECT jsonb_agg(jsonb_build_object('player', COALESCE(p.fullname, 'Unknown'), 'o', (x->>'overs')::float, 'r', (x->>'runs')::int, 'w', (x->>'wickets')::int, 'eco', (x->>'rate')::float))
-            FROM jsonb_array_elements(f.raw_json->'bowling') x
-            LEFT JOIN players p ON (x->>'player_id')::int = p.id
-          ) as bowling_data,
-          f.raw_json->'scoreboards' as score_summary
-   FROM fixtures f
-   JOIN seasons s ON f.season_id = s.id
-   JOIN leagues l ON s.league_id = l.id
-   LEFT JOIN teams t ON f.winner_team_id = t.id
-   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%')
-     AND s.year = '[Year]'
-     AND (f.name ILIKE '%[TeamA]%' OR f.name ILIKE '%[TeamB]%')
-   ORDER BY f.starting_at DESC LIMIT 1;
-   ```
-
-   16. **Team Season Journey / All Matches**:
-    ```sql
-    -- LOGIC: Retrieve ALL matches for a specific team in a season.
-    -- Essential for "Journey", "Performance", "Road to Final" queries.
-    -- IMPORTANT: For RCB (Royal Challengers Bangalore/Bengaluru), check BOTH names or use code 'RCB' via JOIN.
-    SELECT f.name as match, f.status, f.venue_id, t_win.name as winner_name,
-           -- Removed batting_data for journey queries to preserve context
-           f.raw_json->'scoreboards' as score_summary
-    FROM fixtures f
-    JOIN seasons s ON f.season_id = s.id
-    JOIN leagues l ON s.league_id = l.id
-    LEFT JOIN teams t_win ON f.winner_team_id = t_win.id
-    -- Strict Team Filter via JOIN
-    JOIN teams t_local ON COALESCE((f.raw_json->'localteam'->>'id')::int, (f.raw_json->>'localteam_id')::int) = t_local.id
-    JOIN teams t_visitor ON COALESCE((f.raw_json->'visitorteam'->>'id')::int, (f.raw_json->>'visitorteam_id')::int) = t_visitor.id
-    WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%')
-      AND s.year = '[Year]'
-      AND (
-          t_local.name ILIKE '%[TeamName]%' OR t_local.code = '[TeamCode]' 
-          OR t_visitor.name ILIKE '%[TeamName]%' OR t_visitor.code = '[TeamCode]'
-          -- Special Case for RCB:
-          OR t_local.name ILIKE '%Bangalore%' OR t_local.name ILIKE '%Bengaluru%'
-          OR t_visitor.name ILIKE '%Bangalore%' OR t_visitor.name ILIKE '%Bengaluru%'
-      )
-    ORDER BY f.starting_at ASC;
-    ```
-
-   17. **Head-to-Head / Rivalry**:
-    ```sql
-    -- LOGIC: Retrieve ALL matches between TWO specific teams in a season.
-    -- Essential for "PBKS vs RCB head-to-head", "Previous encounters", "Rivalry stats".
-    -- IMPORTANT: Check both Home/Away combinations.
-    SELECT f.name as match, f.status, f.venue_id, t_win.name as winner_name,
-           f.raw_json->'scoreboards' as score_summary
-    FROM fixtures f
-    JOIN seasons s ON f.season_id = s.id
-    JOIN leagues l ON s.league_id = l.id
-    LEFT JOIN teams t_win ON f.winner_team_id = t_win.id
-    -- Use COALESCE to handle both data structures
-    JOIN teams t_local ON COALESCE((f.raw_json->>'localteam_id')::int, (f.raw_json->'localteam'->>'id')::int) = t_local.id
-    JOIN teams t_visitor ON COALESCE((f.raw_json->>'visitorteam_id')::int, (f.raw_json->'visitorteam'->>'id')::int) = t_visitor.id
-    WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%')
-      AND s.year = '[Year]'
-      AND (
-          (
-            (t_local.name ILIKE '%[TeamA]%' OR t_local.code = '[TeamACode]' OR t_local.name ILIKE '%Bangalore%' OR t_local.name ILIKE '%Bengaluru%') 
-            AND 
-            (t_visitor.name ILIKE '%[TeamB]%' OR t_visitor.code = '[TeamBCode]' OR t_visitor.name ILIKE '%Bangalore%' OR t_visitor.name ILIKE '%Bengaluru%')
-          )
-          OR
-          (
-            (t_local.name ILIKE '%[TeamB]%' OR t_local.code = '[TeamBCode]' OR t_local.name ILIKE '%Bangalore%' OR t_local.name ILIKE '%Bengaluru%') 
-            AND 
-            (t_visitor.name ILIKE '%[TeamA]%' OR t_visitor.code = '[TeamACode]' OR t_visitor.name ILIKE '%Bangalore%' OR t_visitor.name ILIKE '%Bengaluru%')
-          )
-      )
-    ORDER BY f.starting_at ASC;
-    ```
-
-   18. **Bowling Extras & Maidens (Deep Stats)**:
-    ```sql
-    -- LOGIC: Aggregate maidens (medians), wides, noballs.
-    -- KEY: 'medians' = Maidens in this DB.
-    -- Use for "Most maidens", "Most wides", "Most no balls".
-    SELECT p.fullname as bowler, t.name as team,
-           SUM((bowl->>'medians')::int) as total_maidens,
-           SUM((bowl->>'wide')::int) as total_wides,
-           SUM((bowl->>'noball')::int) as total_noballs,
-           SUM((bowl->>'wickets')::int) as wickets,
-           COUNT(f.id) as innings
-    FROM fixtures f
-    JOIN seasons s ON f.season_id = s.id
-    JOIN leagues l ON s.league_id = l.id
-    CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'bowling') AS bowl
-    JOIN players p ON (bowl->>'player_id')::int = p.id
-    JOIN teams t ON (bowl->>'team_id')::int = t.id
-    WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%')
-      AND s.year = '[Year]' AND f.status = 'Finished'
-    GROUP BY p.fullname, t.name
-    ORDER BY total_maidens DESC -- Change sort based on user query (wides/noballs)
-    LIMIT 5;
-    ```
-
-   19. **Venue Analytics (Avg Scores)**:
-    ```sql
-    -- LOGIC: Calculate Avg 1st Innings Score and Chasing Stats for a Venue.
-    -- S1 = 1st Innings, S2 = 2nd Innings.
-    SELECT v.name as venue, v.city,
-           COUNT(f.id) as matches,
-           AVG((s1->>'total')::int)::int as avg_1st_inns,
-           AVG((s2->>'total')::int)::int as avg_2nd_inns,
-           MAX((s2->>'total')::int) FILTER (WHERE f.winner_team_id = (s2->>'team_id')::int) as highest_chase
-    FROM fixtures f
-    JOIN venues v ON f.venue_id = v.id
-    JOIN seasons s ON f.season_id = s.id
-    LEFT JOIN LATERAL jsonb_array_elements(f.raw_json->'scoreboards') s1 ON (s1->>'scoreboard' = 'S1')
-    LEFT JOIN LATERAL jsonb_array_elements(f.raw_json->'scoreboards') s2 ON (s2->>'scoreboard' = 'S2')
-    WHERE (v.name ILIKE '%[VenueName]%' OR v.city ILIKE '%[City]%')
-      AND f.status = 'Finished'
-      AND s.year >= '2024' -- Force recent years for 'last 2 years' queries
-    GROUP BY v.name, v.city;
-    ```
-
-   10. **Team Comparison / Points Table (Top N Teams)**:
-    ```sql
-    -- LOGIC: Aggregate wins, losses, and NRR (if available) for the requested tournament.
-    -- Useful for "Compare top 2 teams" or "Points Table".
-    WITH TeamStats AS (
-        SELECT t.name as team_name,
-               COUNT(*) FILTER (WHERE f.winner_team_id = t.id) as wins,
-               COUNT(*) FILTER (WHERE f.winner_team_id IS NOT NULL AND f.winner_team_id != t.id AND f.status = 'Finished') as losses,
-               COUNT(*) as matches_played
-        FROM fixtures f
-        JOIN seasons s ON f.season_id = s.id
-        JOIN leagues l ON s.league_id = l.id
-        JOIN teams t ON (
-            COALESCE((f.raw_json->>'localteam_id')::int, (f.raw_json->'localteam'->>'id')::int) = t.id 
-            OR 
-            COALESCE((f.raw_json->>'visitorteam_id')::int, (f.raw_json->'visitorteam'->>'id')::int) = t.id
-        )
-        WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]'
-        AND f.status = 'Finished'
-        GROUP BY t.name
-    )
-    SELECT team_name, matches_played, wins, losses
-    FROM TeamStats
-    ORDER BY wins DESC, matches_played ASC
-    LIMIT [Limit]; -- Set to 2 for "Top 2 teams", 10 for full table
-    ```
-
-8. **Purple Cap (Most Wickets)**:
-   -- LOGIC: Check season_awards FIRST (Use ILIKE for fuzzy match). Fallback to aggregation if empty.
-   SELECT award_type as category, player_name as player, stats as value
-   FROM season_awards sa
-   JOIN seasons s ON sa.season_id = s.id
-   JOIN leagues l ON s.league_id = l.id
-   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]'
-     AND sa.award_type ILIKE '%Purple Cap%'
-   UNION ALL
-   SELECT 'Calculated Purple Cap' as category, p.fullname AS player, SUM((bowl->>'wickets')::int)::text AS value
-   FROM fixtures f
-   JOIN seasons s ON f.season_id = s.id
-   JOIN leagues l ON s.league_id = l.id
-   CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'bowling') AS bowl
-   JOIN players p ON (bowl->>'player_id')::int = p.id
-   WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]'
-     AND NOT EXISTS (SELECT 1 FROM season_awards sa2 JOIN seasons s2 ON sa2.season_id = s2.id WHERE s2.year = '[Year]' AND sa2.award_type ILIKE '%Purple Cap%')
-   GROUP BY p.fullname 
-   ORDER BY value DESC 
-   LIMIT 1;
-   ```
-   
-   11. **Team Bowling Performance (Best Bowling Unit)**:
-    ```sql
-    -- LOGIC: Aggregate wickets taken by each team's bowlers.
-    -- Use this for queries like "Which team had the best bowling unit?" or "Most wickets by a team".
-    SELECT t.name as team_name, SUM((bowl->>'wickets')::int) as total_wickets, AVG((bowl->>'rate')::float) as avg_economy
-    FROM fixtures f
-    JOIN seasons s ON f.season_id = s.id
-    JOIN leagues l ON s.league_id = l.id
-    CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'bowling') AS bowl
-    JOIN teams t ON (bowl->>'team_id')::int = t.id
-    WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]'
-    GROUP BY t.name
-    ORDER BY total_wickets DESC
-    LIMIT 10;
-    ```
-
-5. **MVP (Valuable Player - Dynamic Formula)**:
-   ```sql
-   -- FORMULA: (runs * 2.5) + (fours * 3.5) + (sixes * 5.0) + (wickets * 3.5) + (dot_balls * 1.0) + (catches/stumping * 2.5)
-   SELECT player_name, SUM(mvp_points) as total_points
-   FROM (
-     -- Batting Points (Runs, 4s, 6s)
-     SELECT p.fullname as player_name, 
-            SUM(
-                COALESCE((bat->>'score')::int, 0) * 2.5 + 
-                COALESCE((bat->>'four_x')::int, 0) * 3.5 + 
-                COALESCE((bat->>'six_x')::int, 0) * 5.0
-            ) as mvp_points
-     FROM fixtures f JOIN seasons s ON f.season_id = s.id
-     JOIN leagues l ON s.league_id = l.id
-     CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'batting') AS bat
-     JOIN players p ON (bat->>'player_id')::int = p.id
-     WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]' GROUP BY 1
-     
-     UNION ALL
-     
-     -- Bowling Points (Wickets)
-     SELECT p.fullname, 
-            SUM(COALESCE((bowl->>'wickets')::int, 0) * 3.5)
-     FROM fixtures f JOIN seasons s ON f.season_id = s.id
-     JOIN leagues l ON s.league_id = l.id
-     CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'bowling') AS bowl
-     JOIN players p ON (bowl->>'player_id')::int = p.id
-     WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]' GROUP BY 1
-     
-     UNION ALL
-     
-     -- Fielding Points (Catches & Stumpings)
-     SELECT p.fullname, 
-            COUNT(*) * 2.5
-     FROM fixtures f JOIN seasons s ON f.season_id = s.id
-     JOIN leagues l ON s.league_id = l.id
-     CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'batting') AS bat
-     JOIN players p ON (bat->>'catch_stump_player_id')::int = p.id
-     WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]' 
-       AND (bat->>'catch_stump_player_id') IS NOT NULL
-     GROUP BY 1
-   ) stats 
-   GROUP BY 1 
-    ORDER BY 2 DESC 
-    LIMIT 10;
-    ```
-
-9. **Highest and Lowest Team Totals**:
-   ```sql
-   -- LOGIC: Use jsonb_array_elements on 'scoreboards' to find team totals.
-   -- IMPORTANT: Filter total > 0 to avoid unplayed/cancelled matches.
-   -- ALSO retrieve batting/bowling data to explain the high score.
-   SELECT f.name as match, (sb->>'total')::int as total_score, t.name as team,
-          f.winner_team_id,
-          f.raw_json->'batting' as batting_data,
-          f.raw_json->'bowling' as bowling_data,
-          f.raw_json->'scoreboards' as score_summary
-   FROM fixtures f
-   JOIN seasons s ON f.season_id = s.id
-   JOIN leagues l ON s.league_id = l.id
-   CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'scoreboards') AS sb
-   JOIN teams t ON (sb->>'team_id')::int = t.id
-   WHERE (l.code = 'IPL' OR l.name ILIKE '%Indian Premier League%') 
-     AND s.year = '2025' AND f.status = 'Finished' AND (sb->>'total')::int > 0
-   ORDER BY total_score ASC  -- Use ASC for lowest, DESC for highest
-   LIMIT 5;
-   ```
-### 🎯 CRITICAL RELEVANCE RULES
-
-**PERFORMANCE QUERY DETECTION** (HIGH PRIORITY):
-- If query contains: "how many wins", "how many matches", "win-loss", "performance", "record", "total wins", "total matches"
-- AND mentions a specific team name
-- THEN use Template -1 (Team Performance Aggregation)
-- This returns pre-calculated stats: total_matches, wins, losses, win_percentage
-- **DO NOT** use Template 16 (Team Season Journey) for counting queries
-- Template 16 is ONLY for "show all matches", "journey", "road to final"
-
-**HIGHEST/LOWEST QUERIES**:
-- MUST use `ORDER BY ... ASC/DESC LIMIT 1`. Never return averages when a specific "highest/lowest" is asked.
-
-**YEAR FILTER**: 
-- Always use `s.year = '[RequestedYear]'`.
-
-**TOURNAMENT PLACEHOLDERS**: 
-- Replace `[TournamentCode]` with `IPL` if query mentions IPL.
-
-**OUTPUT**: 
-- Provide ONLY the SQL query. No explanation. No markdown.
-
-- **Tournament Winners (Champions)**: For queries like "Who won [Tournament]?", ALWAYS check the `season_champions` table FIRST. 
-  - ✅ CORRECT: `SELECT t.name as champion FROM season_champions sc JOIN teams t ON sc.winner_team_id = t.id ...`
-  - ❌ IGNORE `fixtures` for whole-season winner queries unless metadata tables are empty.
-- **Tournament Awards (Orange/Purple Cap, MVP)**: ALWAYS check the `season_awards` table FIRST. Fall back to `fixtures` calculation only if `season_awards` returns no results.
-- **Avoid Data Bloat (CONTEXT LIMIT)**:
-  - If a query fetches **multiple matches** (e.g., a whole season results), **DO NOT include `batting_data` or `bowling_data`** (the giant JSON selections) in the SELECT list unless explicitly asked for scorecards.
-- **Year Filter**: `seasons.year` is TEXT. Use `s.year = '2025'``.
-- **Winner logic**: Match Winner is `winner_team_id`. ALWAYS JOIN `teams` table (`LEFT JOIN teams t ON f.winner_team_id = t.id`) to select `t.name as winner_name`. This is mandatory to prevent reversing results.
-- **Output**: ONLY the SQL query. No markdown. No comments.
-
-   13. **Highest Individual Score**:
-    ```sql
-    -- LOGIC: Find the single highest score in an innings.
-    SELECT p.fullname as player, (bat->>'score')::int as score, (bat->>'ball')::int as balls, f.name as match
-    FROM fixtures f
-    JOIN seasons s ON f.season_id = s.id
-    JOIN leagues l ON s.league_id = l.id
-    CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'batting') AS bat
-    JOIN players p ON (bat->>'player_id')::int = p.id
-    WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]'
-    ORDER BY score DESC
-    LIMIT 5;
-    ```
-
-   14. **Fastest Fifty (Estimate)**:
-    ```sql
-    -- LOGIC: Find scores >= 50 with lowest balls faced.
-    SELECT p.fullname as player, (bat->>'score')::int as score, (bat->>'ball')::int as balls, f.name as match
-    FROM fixtures f
-    JOIN seasons s ON f.season_id = s.id
-    JOIN leagues l ON s.league_id = l.id
-    CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'batting') AS bat
-    JOIN players p ON (bat->>'player_id')::int = p.id
-    WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%') AND s.year = '[Year]'
-      AND (bat->>'score')::int >= 50
-    ORDER BY balls ASC
-    LIMIT 5;
-    ```
-- **Output**: ONLY the SQL query. No markdown. No comments.
-
-   15. **Multi-Year/Trend Analysis**:
-    ```sql
-    -- LOGIC: For multi-year trends (e.g., "Compare 2023 vs 2025"), ONLY query the years present in DB (2024, 2025 onwards).
-    -- DO NOT fail if 2023 is missing. The AI Presenter will fill in 2023 from internal knowledge.
-    SELECT s.year, COUNT(f.id) as matches, AVG((sb->>'total')::int) as avg_score
-    FROM fixtures f
-    JOIN seasons s ON f.season_id = s.id
-    JOIN leagues l ON s.league_id = l.id
-    CROSS JOIN LATERAL jsonb_array_elements(f.raw_json->'scoreboards') AS sb
-    WHERE (l.code = '[TournamentCode]' OR l.name ILIKE '%[TournamentName]%')
-      AND (s.year = '2024' OR s.year = '2025') -- LIMIT TO DB YEARS
-      AND f.status = 'Finished' AND (sb->>'total')::int > 0
-    GROUP BY s.year
-    ORDER BY s.year;
-    ```
-### 🎯 CRITICAL RELEVANCE RULES
-- **Highest/Record Queries**: MUST use `ORDER BY ... DESC LIMIT 1`. Never return averages when a specific "highest" is asked.
-- **Year Filter**: Always use `s.year = '[RequestedYear]'`.
-- **Tournament placeholders**: Replace `[TournamentCode]` with `IPL` if query mentions IPL.
-- **Output**: Provide ONLY the SQL query. No explanation.
-
-"""
+logger = get_logger("universal_engine", "universal_engine.log")
 
 class UniversalCricketEngine:
     def __init__(self):
@@ -624,9 +149,26 @@ class UniversalCricketEngine:
             ],
             temperature=0
         )
-        sql = response.choices[0].message.content.strip()
-        # Clean up Markdown if present
-        sql = sql.replace("```sql", "").replace("```", "").strip()
+        raw_response = response.choices[0].message.content.strip()
+        
+        # 🧠 PARSE REASONING vs SQL
+        # 1. Look for explicit [SQL] block from new prompt structure
+        import re
+        sql_match = re.search(r"\[SQL\](.*)", raw_response, re.DOTALL)
+        if sql_match:
+            sql = sql_match.group(1).strip()
+        else:
+            # 2. Look for markdown code block
+            code_match = re.search(r"```sql(.*?)```", raw_response, re.DOTALL)
+            if code_match:
+                sql = code_match.group(1).strip()
+            else:
+                # 3. Fallback: Assume entire content is SQL (Clean markdown)
+                sql = raw_response.replace("```sql", "").replace("```", "").strip()
+                
+        # Remove any lingering [REASONING] block if it wasn't caught
+        if "[REASONING]" in sql:
+             sql = sql.split("[REASONING]")[0].strip()
         
         # GUARDRAIL: Prevent 'scorecard' key hallucination
         if "scorecard" in sql.lower():
@@ -695,9 +237,6 @@ class UniversalCricketEngine:
             "timestamp": datetime.now().isoformat()
         }
 
-from src.utils.utils_core import get_logger
-logger = get_logger("universal_engine", "universal_engine.log")
-
 async def handle_universal_cricket_query(user_query, context=None):
     """Entry point for the agent workflow."""
     engine = UniversalCricketEngine()
@@ -711,13 +250,32 @@ async def handle_universal_cricket_query(user_query, context=None):
     logger.info(f"Execution Result: {result.get('status')} | Rows: {len(result.get('data', [])) if result.get('data') else 0}")
     
     # 3. Handle Auto-Fix if error
-    if result["status"] == "error":
-        logger.warning(f"SQL Error: {result['message']}")
-        prompt = f"The previous SQL failed with error: {result['message']}\nSQL was: {result['sql']}\nFix it and provide ONLY the corrected SQL."
-        sql_fixed = await engine.generate_sql(user_query, context=prompt)
-        logger.info(f"Fixed SQL: {sql_fixed}")
+    # 3. Handle Auto-Fix if error (Max 3 retries)
+    retries = 0
+    max_retries = 3
+    
+    while result["status"] == "error" and retries < max_retries:
+        retries += 1
+        logger.warning(f"SQL Error (Attempt {retries}/{max_retries}): {result['message']}")
+        
+        # Enhanced Fix Prompt
+        fix_prompt = (
+            f"⚠️ SQL EXECUTION FAILED.\n"
+            f"Error Message: {result['message']}\n"
+            f"Failed SQL: {result['sql']}\n"
+            f"Task: Fix the SQL query to resolve this error completely.\n"
+            f"Check: 1) Table names (fixtures, seasons, leagues, teams, players) 2) Column existence 3) JSONB syntax (raw_json->>'key').\n"
+            f"Output: ONLY the corrected SQL query. No explanation."
+        )
+        
+        sql_fixed = await engine.generate_sql(user_query, context=fix_prompt)
+        logger.info(f"Generated Fix SQL (Attempt {retries}): {sql_fixed}")
+        
         result = await engine.execute_query(sql_fixed)
         logger.info(f"Fixed Execution Result: {result.get('status')} | Rows: {len(result.get('data', [])) if result.get('data') else 0}")
+        
+    if result["status"] == "error":
+        logger.error(f"❌ Failed to fix SQL after {max_retries} attempts.")
     
     
     # 4. Wrap for Research Agent

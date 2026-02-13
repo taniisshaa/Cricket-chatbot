@@ -100,8 +100,10 @@ class SmartRetriever:
             sql = """
             SELECT 
                 f.id, f.name, f.starting_at, f.status,
-                f.raw_json
+                f.raw_json,
+                v.name as venue_name, v.city as city
             FROM fixtures f
+            LEFT JOIN venues v ON f.venue_id = v.id
             WHERE f.starting_at::date = %s
             ORDER BY f.starting_at DESC
             LIMIT 10
@@ -109,6 +111,52 @@ class SmartRetriever:
             results = self._execute_query(sql, (target_date,))
         
         logger.info(f"✅ Found {len(results)} matches")
+        return self._process_match_results(results)
+
+    async def retrieve_live_matches(self) -> List[Dict]:
+        """
+        ⚡ FAST RETRIEVAL: Get all currently live matches.
+        """
+        logger.info("🔴 Retrieving LIVE matches...")
+        sql = """
+        SELECT 
+            f.id, f.name, f.starting_at, f.status, f.venue_id,
+            f.raw_json,
+            l.name as league_name,
+            v.name as venue_name
+        FROM fixtures f
+        JOIN seasons s ON f.season_id = s.id
+        JOIN leagues l ON s.league_id = l.id
+        LEFT JOIN venues v ON f.venue_id = v.id
+        WHERE f.status IN ('Live', '1st Innings', '2nd Innings', 'Innings Break', 'Tea Break', 'Lunch', 'Stumps', 'Int.', 'Delay')
+        ORDER BY f.starting_at DESC
+        """
+        results = self._execute_query(sql)
+        logger.info(f"✅ Found {len(results)} LIVE matches")
+        return self._process_match_results(results)
+
+    async def retrieve_upcoming_matches(self, limit: int = 5) -> List[Dict]:
+        """
+        ⚡ FAST RETRIEVAL: Get upcoming matches.
+        """
+        logger.info("📅 Retrieving UPCOMING matches...")
+        sql = """
+        SELECT 
+            f.id, f.name, f.starting_at, f.status,
+            f.raw_json,
+            l.name as league_name,
+            v.name as venue_name
+        FROM fixtures f
+        JOIN seasons s ON f.season_id = s.id
+        JOIN leagues l ON s.league_id = l.id
+        LEFT JOIN venues v ON f.venue_id = v.id
+        WHERE f.status = 'NS' 
+        AND f.starting_at >= NOW()
+        ORDER BY f.starting_at ASC
+        LIMIT %s
+        """
+        results = self._execute_query(sql, (limit,))
+        logger.info(f"✅ Found {len(results)} UPCOMING matches")
         return self._process_match_results(results)
     
     async def retrieve_player_stats(
@@ -365,8 +413,10 @@ class SmartRetriever:
         SELECT 
             f.id, f.name, f.starting_at, f.status,
             f.raw_json->>'note' as result,
-            f.raw_json
+            f.raw_json,
+            v.name as venue_name, v.city as city
         FROM fixtures f
+        LEFT JOIN venues v ON f.venue_id = v.id
         WHERE f.name ILIKE %s
         AND f.name ILIKE %s
         ORDER BY f.starting_at DESC
@@ -401,10 +451,11 @@ class SmartRetriever:
         SELECT DISTINCT
             f.id, f.name, f.starting_at,
             sb->>'total' as score,
-            sb->>'wickets' as wickets,
             sb->>'overs' as overs,
-            f.raw_json
-        FROM fixtures f,
+            f.raw_json,
+            v.name as venue_name, v.city as city
+        FROM fixtures f
+        LEFT JOIN venues v ON f.venue_id = v.id,
         jsonb_array_elements(f.raw_json->'scoreboards') sb
         WHERE sb->>'type' = 'total'
         AND (sb->>'total')::int = %s
@@ -506,6 +557,10 @@ class SmartRetriever:
                 # Save IDs for enrichment
                 match["_local_id"] = raw.get("localteam_id")
                 match["_visitor_id"] = raw.get("visitorteam_id")
+                
+                # Venue info extraction
+                match["venue_name"] = match.get("venue_name") or raw.get("venue", {}).get("name")
+                match["venue_city"] = match.get("city") or raw.get("venue", {}).get("city")
                 
                 if "raw_json" in match:
                      del match["raw_json"]

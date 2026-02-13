@@ -54,6 +54,13 @@ class ContextBuilder:
             context_parts.append(f"📅 Date: {match.get('starting_at', 'N/A')}")
             context_parts.append(f"📍 Status: {match.get('status', 'N/A')}")
             
+            # Venue Information
+            venue = match.get('venue_name')
+            city = match.get('venue_city')
+            if venue:
+                loc = f"{venue}, {city}" if city else venue
+                context_parts.append(f"🏟️ Venue: {loc}")
+            
             if match.get('result'):
                 context_parts.append(f"🏆 Result: {match['result']}")
             
@@ -313,17 +320,36 @@ class ContextBuilder:
         
         return "\n".join(context_parts)
     
+    def _format_as_markdown_table(self, data: List[Dict]) -> str:
+        """Helper to convert list of dicts to Markdown table."""
+        if not data: return "No Data"
+        try:
+            # Get all unique keys from first few rows to ensure coverage
+            keys = list(data[0].keys())
+            
+            # Prioritize 'name', 'winner', 'count' columns if present
+            # (Sorting keys for consistent output)
+            
+            header = "| " + " | ".join(str(k) for k in keys) + " |"
+            separator = "| " + " | ".join("---" for _ in keys) + " |"
+            rows = []
+            
+            for item in data[:20]: # Limit to 20 rows to keep context tight
+                row_vals = []
+                for k in keys:
+                    val = item.get(k, "")
+                    # Clean value for markdown (no newlines, truncated)
+                    val_str = str(val).replace("\n", " ")[:100] 
+                    row_vals.append(val_str)
+                rows.append("| " + " | ".join(row_vals) + " |")
+            
+            return f"\n{header}\n{separator}\n" + "\n".join(rows)
+        except Exception as e:
+            return f"Error formatting table: {e}. Data: {str(data)[:200]}"
+
     def build_universal_context(self, data: Any, query: str, data_type: str = "auto") -> str:
         """
         Universal context builder that auto-detects data type and formats accordingly.
-        
-        Args:
-            data: Retrieved data (can be list, dict, or any structure)
-            query: Original user query
-            data_type: Type hint ("match", "player", "season", "h2h", or "auto")
-        
-        Returns:
-            Formatted context string
         """
         logger.info(f"🔨 Building context for query: {query[:50]}...")
         
@@ -331,34 +357,36 @@ class ContextBuilder:
         if data_type == "auto":
             if isinstance(data, list) and len(data) > 0:
                 row = data[0]
-                # Enhanced detection for Universal Engine results
-                if "innings_summary" in row or "match" in row or "name" in row or "batting_summary" in row or "scoreboards" in row:
+                if "innings_summary" in row or "match" in row or ("batting_summary" in row and "scoreboards" in row):
                     data_type = "match"
-                elif "player_info" in row or "player_name" in row:
+                elif "player_info" in row:
                     data_type = "player"
-                elif "champion" in row or "winner_name" in row or "award_type" in row:
+                elif "season_info" in row or "champion" in row:
                     data_type = "season"
+                else:
+                    data_type = "generic_table" # Default to table for SQL results
             elif isinstance(data, dict):
                 if "player_info" in data:
                     data_type = "player"
-                elif "season_info" in data:
-                    data_type = "season"
-                elif "champion" in data:
+                elif "season_info" in data: # Single season object
                     data_type = "season"
         
         # Route to appropriate builder
         if data_type == "match":
             return self.build_match_context(data if isinstance(data, list) else [data], query)
         elif data_type == "player":
+            if isinstance(data, list): data = data[0] # Handle list wrapper
             return self.build_player_context(data, query)
         elif data_type == "season":
             return self.build_season_context(data, query)
         elif data_type == "h2h":
             return self.build_head_to_head_context(data, "", "")
+        elif data_type == "generic_table":
+             return f"📊 **DATABASE RESULTS:**\n{self._format_as_markdown_table(data)}"
         else:
             # Fallback: JSON dump with formatting
-            logger.warning(f"⚠️ Unknown data type, using fallback formatting")
-            return f"📊 **DATA RETRIEVED:**\n```json\n{json.dumps(data, indent=2, default=str)[:2000]}\n```"
+            # Only use this if data is truly unstructured
+            return f"📊 **DATA RETRIEVED:**\n```json\n{json.dumps(data, indent=1, default=str)[:1500]}\n```"
     
     def compress_context(self, context: str, max_length: int = 3000) -> str:
         """

@@ -305,6 +305,8 @@ def _normalize_live_match_data(sm_match):
             "current_batting": current_batting_team,
             "note": note,
             "is_live": is_live_final,
+            "t1": local, "t2": visitor,
+            "runs": runs_data,
             "raw_data": sm_match
         }
     except Exception as e:

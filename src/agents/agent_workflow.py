@@ -138,6 +138,13 @@ async def process_user_message(user_query, conversation_history=None):
     if not q_years:
         import re
         q_years = re.findall(r'\b(19|20)\d{2}\b', user_query)
+        
+    # MEMORY INJECTION: If still no years, use context
+    if not q_years:
+        ctx_year = st.session_state.chat_context.get("last_year")
+        if ctx_year:
+            ctx_logger.info(f"🧠 Context Memory: Inheriting Year {ctx_year}")
+            q_years = [ctx_year]
     
     # Ensure all are clean integers
     clean_years = []

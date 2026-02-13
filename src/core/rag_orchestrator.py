@@ -53,12 +53,27 @@ class RAGOrchestrator:
         entities = intent_analysis.get("entities", {})
         time_context = intent_analysis.get("time_context", "PRESENT")
         
+        # COMPLEXITY CHECK: Route logic-heavy queries to Universal Engine
+        q_lower = user_query.lower()
+        is_complex = any(x in q_lower for x in ["how many", "count", "total", "list", "compare", "difference", "highest", "lowest", "most", "best"])
+        
         # Route to appropriate retrieval strategy
-        if intent in ["PAST_HISTORY", "RECORDS"] or time_context == "PAST":
+        if is_complex and intent not in ["HEAD_TO_HEAD"]:
+            # Universal Engine is best for counting/logic/aggregations
+            logger.info("🧠 Complex Query Detected -> Routing to Universal Cricket Engine")
+            result = await self._handle_universal_query(user_query, entities)
+        elif intent == "LIVE_MATCH":
+            result = await self._handle_live_query()
+        elif intent in ["UPCOMING", "UPCOMING_MATCHES"]:
+            result = await self._handle_upcoming_query()
+        elif intent in ["PAST_HISTORY", "RECORDS"] or time_context == "PAST":
             result = await self._handle_historical_query(user_query, entities, intent_analysis)
         elif intent == "PLAYER_STATS":
             result = await self._handle_player_query(user_query, entities)
         elif intent == "SERIES_STATS":
+            # Just straightforward season info? Use standard retriever
+            # But if it's "teams in 2024" (which is count-like), the complexity check above catches it.
+            # If standard retriever fails, we might want fallback?
             result = await self._handle_season_query(user_query, entities)
         elif intent == "HEAD_TO_HEAD":
             result = await self._handle_h2h_query(user_query, entities)
@@ -69,6 +84,33 @@ class RAGOrchestrator:
         
         logger.info(f"✅ RAG PIPELINE COMPLETE: Retrieved {result.get('data_count', 0)} records")
         return result
+
+    async def _handle_live_query(self) -> Dict[str, Any]:
+        """⚡ FAST: Handle live match queries."""
+        matches = await self.retriever.retrieve_live_matches()
+        context = self.context_builder.build_match_context(matches, "Live Matches")
+        return {
+            "status": "success",
+            "data_type": "live_matches",
+            "data_count": len(matches),
+            "context": context,
+            "raw_data": matches,
+            "metadata": {"retrieval_method": "live_fast_track"}
+        }
+
+    async def _handle_upcoming_query(self) -> Dict[str, Any]:
+        """⚡ FAST: Handle upcoming match queries."""
+        matches = await self.retriever.retrieve_upcoming_matches()
+        context = self.context_builder.build_match_context(matches, "Upcoming Matches")
+        return {
+            "status": "success",
+            "data_type": "upcoming_matches",
+            "data_count": len(matches),
+            "context": context,
+            "raw_data": matches,
+            "metadata": {"retrieval_method": "upcoming_fast_track"}
+        }
+
     
     async def _handle_historical_query(
         self, 
@@ -303,7 +345,8 @@ class RAGOrchestrator:
                 "raw_data": result.get("data", []),
                 "metadata": {
                     "retrieval_method": "universal_sql_engine",
-                    "sql_status": "success"
+                    "sql_status": "success",
+                    "executed_sql": result.get("executed_sql", "N/A")
                 }
             }
         elif result.get("query_status") == "no_data":
