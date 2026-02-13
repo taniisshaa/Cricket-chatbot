@@ -500,8 +500,14 @@ class ReActAgent:
                 )
             elif tool_name == "get_player_stats":
                 return await get_player_past_performance(args.get("player_name"))
-            elif tool_name == "universal_query":
+            elif tool_name in ["universal_query", "execute_smart_query"]:
                 return await handle_universal_cricket_query(args.get("user_query") or args.get("query"))
+            elif tool_name == "get_series_analytics":
+                 # Alias or slightly different call if needed, but for now map to summary
+                 return await get_series_history_summary(
+                    series_name=args.get("series_name") or args.get("series") or "IPL",
+                    year=args.get("year") or 2025
+                )
             elif tool_name == "calculate":
                 return await calculate(args.get("expression"))
             elif tool_name == "project_score":
